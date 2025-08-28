@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Better address bar color on mobile -->
+    <meta name="theme-color" content="#0f172a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <title>局域网笔记</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- EasyMDE Markdown Editor -->
+    <link rel="stylesheet" href="https://unpkg.com/easymde/dist/easymde.min.css">
+    <script src="https://unpkg.com/easymde/dist/easymde.min.js"></script>
+    <!-- SortableJS for Drag-and-Drop -->
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body class="text-slate-300 h-screen w-screen overflow-hidden">
+
+    <!-- 主容器 -->
+    <div class="flex h-full w-full relative">
+
+
+        <aside id="sidebar"
+            class="absolute bg-slate-800 flex flex-col h-full border-r border-slate-700 w-80 lg:w-96 transition-all duration-300 ease-in-out z-20 transform translate-x-0">
+            <header class="p-4 flex-shrink-0 border-b border-slate-700 flex justify-between items-center">
+                <h1 class="text-2xl font-bold text-indigo-400">本地同步</h1>
+                <button onclick="toggleSidebar()" title="收起/展开侧边栏" class="p-2 rounded-md hover:bg-slate-700">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7">
+                        </path>
+                    </svg>
+                </button>
+            </header>
+            <nav class="px-4 pt-4 flex-shrink-0">
+                <div class="flex border-b border-slate-700">
+                    <button onclick="changeTab('notes')" id="tab-btn-notes"
+                        class="flex-1 py-2 text-center font-semibold">笔记</button>
+                    <button onclick="changeTab('files')" id="tab-btn-files"
+                        class="flex-1 py-2 text-center font-semibold">文件</button>
+                </div>
+            </nav>
+            <div class="flex-grow overflow-y-auto p-4">
+                <div id="notes-sidebar-content" class="hidden flex-col"></div>
+                <div id="files-sidebar-content" class="hidden flex-col"></div>
+            </div>
+        </aside>
+        <!-- Mobile backdrop for sidebar -->
+        <div id="sidebar-backdrop"
+            class="fixed inset-0 bg-black/50 lg:hidden opacity-0 pointer-events-none transition-opacity z-10"></div>
+
+        <main id="main-content" class="flex-grow flex flex-col h-full min-h-0 overflow-hidden">
+            <!-- 置顶标题栏，显示当前组/条目标题，并集成侧边栏开关与动作按钮 -->
+            <header id="main-topbar"
+                class="flex items-center gap-3 px-3 sm:px-4 py-2 sm:py-3 bg-slate-800/80 backdrop-blur-md border-b border-slate-700 shadow-lg flex-none sticky top-0 z-10">
+                <button onclick="toggleSidebar()" aria-label="切换侧边栏" title="收起/展开侧边栏"
+                    class="tb-btn hover:bg-slate-700 border border-slate-700">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M4 6h16M4 12h16M4 18h16"></path>
+                    </svg>
+                </button>
+                <div class="min-w-0 flex items-center gap-2">
+                    <span id="topbar-group" class="truncate text-lg font-semibold text-slate-200"></span>
+                    <span id="topbar-sep" class="text-slate-500">/</span>
+                    <span id="topbar-entry" class="truncate text-slate-300"></span>
+                </div>
+                <div id="topbar-actions" class="ml-auto flex items-center gap-2"></div>
+            </header>
+
+            <div id="welcome-screen" class="w-full h-full flex items-center justify-center text-center p-6"></div>
+            <div id="entry-list-view" class="hidden w-full h-full min-h-0 flex flex-col p-6"></div>
+            <div id="editor-view" class="hidden h-full min-h-0 flex-grow flex flex-col overflow-hidden"></div>
+        </main>
+    </div>
+
+    <!-- 新建文字组 Modal -->
+    <div id="new-group-modal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+        <div class="bg-slate-800 rounded-lg shadow-xl p-6 w-full max-w-md border border-slate-700">
+            <h2 class="text-2xl font-bold mb-4">新建/编辑文字组</h2>
+            <input type="hidden" id="edit-group-id">
+            <input id="new-group-title" type="text" placeholder="文字组标题"
+                class="w-full bg-slate-700 border border-slate-600 rounded-md px-3 py-2 mb-4 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <input id="new-group-tags" type="text" placeholder="标签 (用逗号分隔)"
+                class="w-full bg-slate-700 border border-slate-600 rounded-md px-3 py-2 mb-4 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <div class="flex justify-end space-x-4">
+                <button onclick="hideNewGroupModal()"
+                    class="px-4 py-2 bg-slate-600 hover:bg-slate-700 rounded-md transition-all">取消</button>
+                <button onclick="createOrUpdateGroup()"
+                    class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 rounded-md text-white font-bold transition-all">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 新建卷 Modal -->
+    <div id="new-volume-modal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+        <div class="bg-slate-800 rounded-lg shadow-xl p-6 w-full max-w-md border border-slate-700">
+            <h2 class="text-2xl font-bold mb-4">新建卷</h2>
+            <input type="hidden" id="new-volume-group-id">
+            <input id="new-volume-title" type="text" placeholder="卷标题"
+                class="w-full bg-slate-700 border border-slate-600 rounded-md px-3 py-2 mb-4 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <div class="flex justify-end space-x-4">
+                <button onclick="hideNewVolumeModal()"
+                    class="px-4 py-2 bg-slate-600 hover:bg-slate-700 rounded-md transition-all">取消</button>
+                <button onclick="handleCreateVolume()"
+                    class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 rounded-md text-white font-bold transition-all">创建</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 通用确认 Modal -->
+    <div id="confirm-modal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+        <div class="bg-slate-800 rounded-lg shadow-xl p-6 w-full max-w-md border border-slate-700">
+            <h2 id="confirm-modal-title" class="text-2xl font-bold mb-4"></h2>
+            <p id="confirm-modal-body" class="mb-6 break-words"></p>
+            <div class="flex justify-end space-x-4">
+                <button onclick="hideConfirmModal()"
+                    class="px-4 py-2 bg-slate-600 hover:bg-slate-700 rounded-md transition-all">取消</button>
+                <button id="confirm-modal-action-btn"
+                    class="px-4 py-2 rounded-md text-white font-bold transition-all">确认</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+
+</html>

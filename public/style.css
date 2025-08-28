@@ -1,0 +1,441 @@
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background-color: #0f172a;
+}
+
+::-webkit-scrollbar {
+    width: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #1e293b;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #475569;
+    border-radius: 4px;
+}
+
+.editor-toolbar {
+    background-color: #1e293b;
+    border-color: #334155 !important;
+}
+
+.EasyMDEContainer .cm-s-easymde {
+    background-color: #0f172a;
+    border-color: #334155 !important;
+    color: #cbd5e1;
+}
+
+.CodeMirror {
+    border: none !important;
+    height: 100%;
+}
+
+.EasyMDEContainer {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+}
+
+.editor-toolbar a {
+    color: #94a3b8 !important;
+    border-radius: 4px;
+}
+
+.editor-toolbar a.active,
+.editor-toolbar a:hover {
+    background: #334155;
+    border-color: #475569 !important;
+}
+
+.editor-preview {
+    background-color: #0f172a;
+}
+
+.editor-statusbar {
+    background-color: #1e293b;
+    border-top: 1px solid #334155;
+    color: #64748b;
+}
+
+/* 保证状态栏在 Flex 布局中占据固定高度并可见 */
+.EasyMDEContainer .editor-statusbar {
+    flex: 0 0 auto;
+}
+
+
+#sidebar {
+    transition: transform 0.3s ease-in-out;
+}
+
+#main-content {
+    transition: margin-left 0.3s ease-in-out;
+}
+
+/* 保持顶栏始终可见，移除隐藏动画 */
+#main-topbar {
+    /* 仅保留必要的过渡用于尺寸变化 */
+    transition: height 0.18s ease-in-out, padding 0.18s ease-in-out, border-width 0.18s ease-in-out, background-color 0.2s ease;
+    overflow: hidden;
+    height: var(--topbar-h, 56px);
+    /* 更柔和的玻璃拟态背景与发光分割线 */
+    background: radial-gradient(1200px 120px at 20% -40%, rgba(99, 102, 241, 0.12), transparent),
+        linear-gradient(to bottom, rgba(15, 23, 42, 0.85), rgba(15, 23, 42, 0.7));
+    -webkit-backdrop-filter: saturate(140%) blur(10px);
+    backdrop-filter: saturate(140%) blur(10px);
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+    border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+    padding-left: max(env(safe-area-inset-left), 0.75rem);
+    padding-right: max(env(safe-area-inset-right), 0.75rem);
+}
+
+/* 更大的触控目标与统一按钮风格 */
+.tb-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: .5rem;
+    padding: .5rem .625rem;
+    min-height: 40px;
+    min-width: 40px;
+    border-radius: .5rem;
+    color: #e2e8f0;
+    background: rgba(30, 41, 59, 0.6);
+}
+
+.tb-btn .label {
+    font-weight: 600;
+    font-size: 0.875rem;
+}
+
+.tb-btn:hover {
+    background: rgba(51, 65, 85, 0.8);
+}
+
+.tb-btn svg {
+    pointer-events: none;
+}
+
+/* 使 group/entry 文本在小屏也更紧凑且可截断 */
+#topbar-group {
+    max-width: 38vw;
+}
+
+#topbar-entry input {
+    max-width: 72vw;
+}
+
+@media (min-width: 640px) {
+    #topbar-group {
+        max-width: 24vw;
+    }
+
+    #topbar-entry input {
+        max-width: 40vw;
+    }
+}
+
+.sortable-ghost {
+    opacity: 0.4;
+    background-color: #334155;
+}
+
+.sortable-drag {
+    opacity: 1 !important;
+}
+
+/* --- Mobile & editor sizing improvements --- */
+/* Fix 100vh issues on mobile Safari/Chrome */
+body.h-screen {
+    height: calc(var(--vh, 1vh) * 100);
+}
+
+@supports (height: 100dvh) {
+    body.h-screen {
+        height: 100dvh;
+    }
+}
+
+/* Allow nested flex children to shrink properly */
+#main-content,
+#editor-view,
+#entry-list-view {
+    min-height: 0;
+}
+
+/* Make EasyMDE layout fill and scroll correctly */
+.EasyMDEContainer {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+}
+
+.EasyMDEContainer .editor-toolbar {
+    flex: 0 0 auto;
+}
+
+.EasyMDEContainer .CodeMirror {
+    flex: 1 1 auto;
+    height: 100% !important;
+    /* 由 auto 改为 100%，确保填满容器高度 */
+    min-height: 0;
+}
+
+.CodeMirror-scroll {
+    height: 100% !important;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 0 !important;
+    /* 去掉底部多余空白 */
+}
+
+.editor-preview,
+.editor-preview-side {
+    height: 100% !important;
+    overflow: auto;
+    padding-bottom: 0 !important;
+    /* 去掉预览底部多余空白 */
+}
+
+/* Smooth touch scrolling inside editor */
+.CodeMirror-scroll {
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 8px;
+    /* 减小底部空白 */
+}
+
+/* Ensure the viewport has some breathing room at bottom in preview too */
+.editor-preview,
+.editor-preview-side {
+    padding-bottom: 16px;
+    /* 去掉安全区 */
+}
+
+/* 去掉安全区：主内容不再预留底部内边距 */
+#main-content {
+    padding-bottom: 0 !important;
+}
+
+/* --- New: Mobile floating action button (FAB) and touch polish --- */
+#fab-new-entry {
+    box-shadow: 0 10px 20px rgba(0, 0, 0, .35), 0 6px 6px rgba(0, 0, 0, .2);
+    transform: translateZ(0);
+}
+
+#fab-new-entry:active {
+    transform: translateY(1px);
+}
+
+/* Improve tap targets on small screens */
+@media (max-width: 640px) {
+    .tb-btn {
+        min-height: 44px;
+        min-width: 44px;
+    }
+}
+
+/* Better drag visual feedback */
+.sortable-ghost {
+    opacity: 0.45;
+    background-color: #334155;
+}
+
+.sortable-chosen {
+    outline: 2px dashed rgba(99, 102, 241, .6);
+    outline-offset: 2px;
+}
+
+/* Smooth sidebar slide for mobile */
+#sidebar {
+    will-change: transform;
+}
+
+#sidebar-backdrop {
+    transition: opacity .25s ease;
+}
+
+/* Safer text truncation in list cards */
+#entry-list-container h3 {
+    word-break: break-word;
+}
+
+/* Use safe-area for FAB */
+@supports (padding: max(0px)) {
+    #fab-new-entry {
+        right: max(1.0rem, env(safe-area-inset-right));
+        bottom: max(1.0rem, env(safe-area-inset-bottom));
+    }
+}
+
+/* --- Markdown preview typography (fix Tailwind preflight resets) --- */
+.editor-preview,
+.editor-preview-side {
+    color: #e2e8f0;
+    line-height: 1.75;
+    font-size: 0.95rem;
+}
+
+.editor-preview h1,
+.editor-preview-side h1 {
+    font-size: 1.875rem;
+    /* text-3xl */
+    line-height: 2.25rem;
+    font-weight: 700;
+    margin: 1.25em 0 0.5em;
+}
+
+.editor-preview h2,
+.editor-preview-side h2 {
+    font-size: 1.5rem;
+    /* text-2xl */
+    line-height: 2rem;
+    font-weight: 700;
+    margin: 1.2em 0 0.5em;
+}
+
+.editor-preview h3,
+.editor-preview-side h3 {
+    font-size: 1.25rem;
+    /* text-xl */
+    line-height: 1.75rem;
+    font-weight: 600;
+    margin: 1.1em 0 0.5em;
+}
+
+.editor-preview h4,
+.editor-preview-side h4 {
+    font-size: 1.125rem;
+    /* text-lg */
+    line-height: 1.6rem;
+    font-weight: 600;
+    margin: 1em 0 0.5em;
+}
+
+.editor-preview p,
+.editor-preview-side p {
+    margin: 0.75em 0;
+}
+
+.editor-preview ul,
+.editor-preview-side ul {
+    list-style: disc;
+    padding-left: 1.25rem;
+    margin: 0.75em 0;
+}
+
+.editor-preview ol,
+.editor-preview-side ol {
+    list-style: decimal;
+    padding-left: 1.25rem;
+    margin: 0.75em 0;
+}
+
+.editor-preview li>ul,
+.editor-preview li>ol,
+.editor-preview-side li>ul,
+.editor-preview-side li>ol {
+    margin-top: 0.375em;
+}
+
+.editor-preview blockquote,
+.editor-preview-side blockquote {
+    margin: 1em 0;
+    padding-left: 1em;
+    border-left: 3px solid #475569;
+    color: #94a3b8;
+}
+
+.editor-preview hr,
+.editor-preview-side hr {
+    border: 0;
+    border-top: 1px solid #334155;
+    margin: 1.5em 0;
+}
+
+.editor-preview a,
+.editor-preview-side a {
+    color: #818cf8;
+    text-decoration: underline;
+}
+
+.editor-preview a:hover,
+.editor-preview-side a:hover {
+    color: #a5b4fc;
+}
+
+.editor-preview code,
+.editor-preview-side code {
+    background: #111827;
+    color: #e5e7eb;
+    padding: 0.15em 0.35em;
+    border-radius: 4px;
+    border: 1px solid #374151;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-size: 0.9em;
+}
+
+.editor-preview pre,
+.editor-preview-side pre {
+    background: #0b1220;
+    border: 1px solid #334155;
+    padding: 0.75rem;
+    border-radius: 8px;
+    overflow: auto;
+    margin: 0.85em 0;
+}
+
+.editor-preview pre code,
+.editor-preview-side pre code {
+    background: transparent;
+    border: 0;
+    padding: 0;
+    color: #cbd5e1;
+    font-size: 0.95em;
+}
+
+.editor-preview table,
+.editor-preview-side table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1em 0;
+    font-size: 0.95rem;
+}
+
+.editor-preview th,
+.editor-preview td,
+.editor-preview-side th,
+.editor-preview-side td {
+    border: 1px solid #334155;
+    padding: 0.5rem 0.75rem;
+}
+
+.editor-preview th,
+.editor-preview-side th {
+    background: #0b1220;
+    color: #e2e8f0;
+}
+
+.editor-preview img,
+.editor-preview-side img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 6px;
+    display: block;
+    margin: 0.5em auto;
+}
+
+/* Preview snippet clamp */
+.preview-snippet {
+    color: #94a3b8;
+    /* slate-400 */
+    margin-top: .25rem;
+    font-size: .875rem;
+    /* text-sm */
+    display: -webkit-box;
+    line-clamp: 2;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
