@@ -1,0 +1,170 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>选择服务器 - 局域网笔记</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
+    <style>
+        body {
+            padding: 1rem;
+        }
+
+        .row {
+            display: flex;
+            gap: .75rem;
+            align-items: center;
+        }
+
+        .server-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: .5rem .75rem;
+            border: 1px solid #ccc;
+            border-radius: .5rem;
+            margin: .5rem 0;
+        }
+
+        .muted {
+            opacity: .7
+        }
+
+        .actions {
+            display: flex;
+            gap: .5rem;
+        }
+
+        .pin {
+            font-size: .8rem;
+            padding: .15rem .4rem;
+            background: #eee;
+            border-radius: .35rem;
+            margin-left: .5rem;
+        }
+    </style>
+</head>
+
+<body>
+    <main class="container">
+        <h2>选择或添加服务器</h2>
+        <p id="diag" class="muted"></p>
+
+        <article>
+            <header class="row">
+                <strong>本机服务器</strong>
+                <span id="local-state" class="pin muted">未运行</span>
+            </header>
+            <div class="row">
+                <button id="btn-start" class="contrast">启动本机</button>
+                <button id="btn-stop" class="secondary">停止本机</button>
+            </div>
+        </article>
+
+        <article>
+            <header><strong>其他服务器</strong></header>
+            <div class="row">
+                <input id="name" placeholder="名称(可选)" />
+                <input id="host" placeholder="IP 或域名" />
+                <input id="port" placeholder="端口" type="number" value="3000" />
+                <button id="btn-add">添加</button>
+            </div>
+            <div id="list"></div>
+        </article>
+    </main>
+
+    <script>
+        const listEl = document.getElementById('list');
+        const localState = document.getElementById('local-state');
+        const diag = document.getElementById('diag');
+        window.addEventListener('DOMContentLoaded', () => {
+            const ok = !!(window.lanApp && window.lanOffline);
+            const storeErr = window.lanDiag?.storeError;
+            diag.textContent = ok ? '预加载已连接 (lanApp 可用)' : '预加载不可用，按钮将无效';
+            if (storeErr) diag.textContent += ` | 存储降级: ${storeErr}`;
+            console.log('lanApp:', window.lanApp, 'lanDiag:', window.lanDiag);
+        });
+
+        let isTyping = false;
+        ['name', 'host', 'port'].forEach(id => {
+            const el = document.getElementById(id);
+            el.addEventListener('focus', () => { isTyping = true; });
+            el.addEventListener('blur', () => { setTimeout(() => { isTyping = false; }, 100); });
+        });
+
+        async function refresh() {
+            if (isTyping) return; // avoid stealing focus while typing
+            const { servers, localServerRunning } = await window.lanApp.listServers();
+            localState.textContent = localServerRunning ? '运行中' : '未运行';
+            // toggle start button label/behavior
+            const startBtn = document.getElementById('btn-start');
+            const stopBtn = document.getElementById('btn-stop');
+            if (localServerRunning) {
+                startBtn.textContent = '进入本机';
+                startBtn.onclick = async () => { console.log('[UI] enter local'); await window.lanApp.openServer('127.0.0.1', 3000); };
+                stopBtn.disabled = false;
+            } else {
+                startBtn.textContent = '启动本机';
+                startBtn.onclick = async () => {
+                    console.log('[UI] start local');
+                    const ok = await window.lanApp.startLocal();
+                    if (!ok) { alert('无法启动本机服务器'); return; }
+                    // do not open immediately; switch to "进入本机" on next refresh
+                    await refresh();
+                };
+                stopBtn.disabled = true;
+            }
+            listEl.innerHTML = '';
+            servers.forEach(s => {
+                const div = document.createElement('div');
+                div.className = 'server-item';
+                const left = document.createElement('div');
+                left.textContent = `${s.name}  (${s.host}:${s.port})`;
+                if (s.pinned) {
+                    const pin = document.createElement('span'); pin.className = 'pin'; pin.textContent = '固定'; left.appendChild(pin);
+                }
+                const actions = document.createElement('div'); actions.className = 'actions';
+                const openBtn = document.createElement('button'); openBtn.textContent = '进入';
+                openBtn.onclick = async () => {
+                    // First-time check
+                    const ok = await window.lanApp.checkServer(s.host, s.port);
+                    if (!ok) {
+                        // allow offline iff we have cached data
+                        const cached = await window.lanOffline?.getData?.(s.host, s.port);
+                        if (!cached) {
+                            alert('首次进入需在线初始化，请确保服务器可达。');
+                            return;
+                        }
+                        await window.lanApp.openServerOffline?.(s.host, s.port);
+                    } else {
+                        await window.lanApp.openServer(s.host, s.port);
+                    }
+                };
+                actions.appendChild(openBtn);
+                if (!s.pinned) {
+                    const rm = document.createElement('button'); rm.className = 'secondary'; rm.textContent = '删除';
+                    rm.onclick = async () => { await window.lanApp.removeServer(s.id); refresh(); };
+                    actions.appendChild(rm);
+                }
+                div.appendChild(left); div.appendChild(actions);
+                listEl.appendChild(div);
+            });
+        }
+
+        document.getElementById('btn-add').onclick = async () => {
+            console.log('[UI] add clicked');
+            const name = document.getElementById('name').value.trim();
+            const host = document.getElementById('host').value.trim();
+            const port = parseInt(document.getElementById('port').value || '3000', 10);
+            if (!host || !port) return alert('请输入主机与端口');
+            try { await window.lanApp.addServer(name, host, port); } catch (e) { console.error(e); }
+            refresh();
+        };
+        document.getElementById('btn-stop').onclick = async () => { console.log('[UI] stop clicked'); try { await window.lanApp.stopLocal(); } catch (e) { console.error(e); } refresh(); };
+
+        refresh();
+    </script>
+</body>
+
+</html>

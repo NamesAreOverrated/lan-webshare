@@ -80,7 +80,57 @@ function detachEditorScrollListener() { }
 // ============================
 const DOM = { sidebar: document.getElementById('sidebar'), notesSidebarContent: document.getElementById('notes-sidebar-content'), filesSidebarContent: document.getElementById('files-sidebar-content'), welcomeScreen: document.getElementById('welcome-screen'), entryListView: document.getElementById('entry-list-view'), editorView: document.getElementById('editor-view'), tabBtnNotes: document.getElementById('tab-btn-notes'), tabBtnFiles: document.getElementById('tab-btn-files'), newGroupModal: document.getElementById('new-group-modal'), sidebarBackdrop: document.getElementById('sidebar-backdrop'), newVolumeModal: document.getElementById('new-volume-modal'), confirmModal: document.getElementById('confirm-modal') };
 let ws;
-function connect() { ws = new WebSocket(`${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`); ws.onopen = () => console.log('Connected'); ws.onclose = () => setTimeout(connect, 3000); ws.onerror = console.error; ws.onmessage = handleWebSocketMessage; }
+let queuedOps = [];
+let online = true;
+
+function tryLoadOffline() {
+    if (!window.__isElectron || !window.lanOffline) return false;
+    const cached = window.lanOffline.getData(window.__serverHost, window.__serverPort);
+    if (cached) {
+        AppState.data = cached;
+        queuedOps = window.lanOffline.getQueue(window.__serverHost, window.__serverPort) || [];
+        render();
+        return true;
+    }
+    return false;
+}
+
+function persistOffline() {
+    if (!window.__isElectron || !window.lanOffline) return;
+    try { window.lanOffline.saveData(window.__serverHost, window.__serverPort, AppState.data); } catch { }
+}
+
+function queueOp(type, payload) {
+    if (!window.__isElectron || !window.lanOffline) return;
+    window.lanOffline.pushOp(window.__serverHost, window.__serverPort, { type, payload, ts: Date.now() });
+}
+
+async function flushQueue() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!window.__isElectron || !window.lanOffline) return;
+    const q = window.lanOffline.getQueue(window.__serverHost, window.__serverPort) || [];
+    if (!q.length) return;
+    // Send in order
+    for (const op of q) {
+        try { ws.send(JSON.stringify({ type: op.type, payload: op.payload })); }
+        catch (e) { console.warn('Failed to send queued op', e); break; }
+    }
+    // Clear after attempt; server's full_sync will overwrite
+    window.lanOffline.clearQueue(window.__serverHost, window.__serverPort);
+}
+
+function connect() {
+    try { ws?.close?.(); } catch { }
+    const host = (window.__overrideServerHost || window.__serverHost);
+    const port = (window.__overrideServerPort || window.__serverPort);
+    const proto = (port === 443 || window.location.protocol === 'https:') ? 'wss' : 'ws';
+    const url = `${proto}://${host}:${port}`;
+    ws = new WebSocket(url);
+    ws.onopen = () => { console.log('Connected'); online = true; flushQueue(); };
+    ws.onclose = () => { online = false; if (!tryLoadOffline()) setTimeout(connect, 3000); else setTimeout(connect, 5000); };
+    ws.onerror = (e) => { console.error(e); };
+    ws.onmessage = (ev) => { handleWebSocketMessage(ev); if (window.__isElectron) persistOffline(); };
+}
 function handleWebSocketMessage(event) {
     const message = JSON.parse(event.data);
     if (message.type === 'full_sync') {
@@ -141,7 +191,14 @@ function handleWebSocketMessage(event) {
         }
     } else if (message.type === 'files_updated' && AppState.ui.activeTab === 'files') { fetchFiles(); }
 }
-function sendMessage(type, payload) { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type, payload })); }
+function sendMessage(type, payload) {
+    if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type, payload }));
+    } else {
+        // Offline: queue and apply optimistic change
+        queueOp(type, payload);
+    }
+}
 
 function render(skipEditorRecreation = false) { renderLayout(); renderTopBar(); renderSidebar(); renderMainContent(skipEditorRecreation); }
 function renderLayout() {
@@ -181,6 +238,11 @@ function renderTopBar() {
         requestAnimationFrame(measureTopbarHeight);
         return;
     }
+    // Show online/offline badge in actions
+    const badge = document.createElement('span');
+    badge.className = `px-2 py-0.5 rounded text-xs ${online ? 'bg-green-600 text-white' : 'bg-slate-600 text-slate-200'}`;
+    badge.textContent = online ? '在线' : '离线';
+    actionsEl.appendChild(badge);
     let groupTitle = '欢迎';
     let entryTitle = '';
     let group = null;
@@ -236,9 +298,10 @@ function renderTopBar() {
         sepEl.style.display = 'none';
         // 在组列表视图（选中组但未选中条目）保留导出与卷操作
         if (group) {
+            const baseUrl = `http://${(window.__overrideServerHost || window.__serverHost)}:${(window.__overrideServerPort || window.__serverPort)}`;
             actionsEl.innerHTML = `
                 <div class="flex items-center gap-2">
-                    <a href="/export?groupId=${encodeURIComponent(group.id)}" class="p-2 rounded-md bg-green-600 hover:bg-green-700 text-white font-semibold flex items-center gap-2">
+                <a href="${baseUrl}/export?groupId=${encodeURIComponent(group.id)}" class="p-2 rounded-md bg-green-600 hover:bg-green-700 text-white font-semibold flex items-center gap-2">
                         <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd"></path></svg>
                         <span class="hidden sm:inline">导出</span>
                     </a>
@@ -257,7 +320,41 @@ function renderSidebar() {
     if (activeTab === 'notes') renderNoteSidebar(); else renderFileSidebar();
 }
 function renderNoteSidebar() { DOM.notesSidebarContent.innerHTML = `<button onclick="showNewGroupModal()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-md mb-6 transition-all flex items-center justify-center gap-2"><svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clip-rule="evenodd"></path></svg>新建文字组</button><div id="tag-filter-container-inner" class="mb-4"></div><div id="group-list-inner" class="flex-grow space-y-2"></div>`; renderTagFilters(); renderGroupList(); }
-function renderFileSidebar() { DOM.filesSidebarContent.innerHTML = `<form action="/upload" method="post" enctype="multipart/form-data" class="mb-4"><input type="file" name="file" required class="block w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-100 file:text-indigo-700 hover:file:bg-indigo-200 mb-2 cursor-pointer"/><button type="submit" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-md transition-all">上传文件</button></form><div class="flex-grow"><h3 class="text-lg font-semibold mb-2 border-b border-slate-700 pb-1">已上传的文件</h3><ul id="file-list-inner" class="space-y-2 mt-2"></ul></div>`; fetchFiles(); }
+function renderFileSidebar() {
+    DOM.filesSidebarContent.innerHTML = `
+        <form id="upload-form" class="mb-4">
+            <input id="upload-input" type="file" name="file" required class="block w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-100 file:text-indigo-700 hover:file:bg-indigo-200 mb-2 cursor-pointer"/>
+            <button type="submit" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-md transition-all">上传文件</button>
+        </form>
+        <div class="flex-grow">
+            <h3 class="text-lg font-semibold mb-2 border-b border-slate-700 pb-1">已上传的文件</h3>
+            <ul id="file-list-inner" class="space-y-2 mt-2"></ul>
+        </div>`;
+    // Bind upload via fetch to server (works when UI is file://)
+    const form = document.getElementById('upload-form');
+    const input = document.getElementById('upload-input');
+    if (form && input) {
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!input.files || !input.files.length) return;
+            const file = input.files[0];
+            const fd = new FormData();
+            fd.append('file', file);
+            const baseUrl = `http://${(window.__overrideServerHost || window.__serverHost)}:${(window.__overrideServerPort || window.__serverPort)}`;
+            try {
+                const res = await fetch(`${baseUrl}/upload`, { method: 'POST', body: fd });
+                const js = await res.json().catch(() => ({}));
+                if (!res.ok || js?.ok === false) throw new Error('upload failed');
+                input.value = '';
+                fetchFiles();
+            } catch (err) {
+                alert('上传失败，稍后重试');
+                console.error('Upload failed', err);
+            }
+        });
+    }
+    fetchFiles();
+}
 function renderTagFilters() {
     const el = document.getElementById('tag-filter-container-inner');
     el.innerHTML = AppState.data.tags.length > 0 ? `
@@ -481,7 +578,7 @@ function renderEditor() {
         ]
     });
     AppState.ui.hasRemoteUpdateConflict = false;
-    easyMDE.codemirror.on('change', () => { if (AppState.ui.isApplyingRemoteUpdate) return; AppState.ui.lastLocalEditAt = Date.now(); clearTimeout(debounceTimer); debounceTimer = setTimeout(saveEntryChanges, 500); });
+    easyMDE.codemirror.on('change', () => { if (AppState.ui.isApplyingRemoteUpdate) return; AppState.ui.lastLocalEditAt = Date.now(); clearTimeout(debounceTimer); debounceTimer = setTimeout(saveEntryChanges, 500); if (!online) persistOffline(); });
     easyMDE.codemirror.on('focus', () => { AppState.ui.isEditorFocused = true; });
     easyMDE.codemirror.on('blur', () => { AppState.ui.isEditorFocused = false; });
     requestAnimationFrame(() => { refreshEditorSize(); setTimeout(refreshEditorSize, 120); });
@@ -490,9 +587,10 @@ async function fetchFiles() {
     const el = document.getElementById('file-list-inner');
     if (!el) return;
     try {
-        const res = await fetch('/files');
+        const baseUrl = `http://${(window.__overrideServerHost || window.__serverHost)}:${(window.__overrideServerPort || window.__serverPort)}`;
+        const res = await fetch(`${baseUrl}/files`);
         const files = await res.json();
-        el.innerHTML = files.map(file => `<li class="bg-slate-700/50 p-2 rounded-md hover:bg-slate-700"><a href="/uploads/${encodeURIComponent(file)}" download class="text-indigo-400 hover:underline text-sm truncate block">${escHtml(file)}</a></li>`).join('') || '<li class="text-sm text-slate-500">暂无文件</li>';
+        el.innerHTML = files.map(file => `<li class="bg-slate-700/50 p-2 rounded-md hover:bg-slate-700"><a href="${baseUrl}/uploads/${encodeURIComponent(file)}" download class="text-indigo-400 hover:underline text-sm truncate block">${escHtml(file)}</a></li>`).join('') || '<li class="text-sm text-slate-500">暂无文件</li>';
     } catch (e) {
         el.innerHTML = '<li class="text-sm text-red-400">无法加载</li>';
     }
@@ -680,7 +778,7 @@ function saveEntryChanges() {
     const currentContent = easyMDE.value();
     const titleEl = document.getElementById('entry-title-input');
     const currentTitle = titleEl ? titleEl.value : '';
-    sendMessage('update_entry', { groupId: AppState.ui.selectedGroupId, entryId: AppState.ui.selectedEntryId, title: currentTitle, content: currentContent });
+    sendMessage('update_entry', { groupId: AppState.ui.selectedGroupId, entryId: AppState.ui.selectedEntryId, title: currentTitle, content: currentContent, updatedAt: new Date().toISOString() });
     AppState.ui.lastSavedAt = Date.now();
 }
 function toggleTagFilter(tag) { if (AppState.ui.selectedTags.has(tag)) AppState.ui.selectedTags.delete(tag); else AppState.ui.selectedTags.add(tag); render(); }
@@ -708,7 +806,7 @@ function createOrUpdateGroup() {
     const tags = document.getElementById('new-group-tags').value.split(',').map(t => t.trim()).filter(Boolean);
     if (title) {
         if (id) {
-            sendMessage('update_group', { id, title, tags });
+            sendMessage('update_group', { id, title, tags, updatedAt: new Date().toISOString() });
         } else {
             // 立即在本地创建分组以实现即时UI更新
             const newGroup = {
