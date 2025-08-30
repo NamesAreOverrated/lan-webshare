@@ -503,6 +503,11 @@ function NotesScreen({ server, onBack }) {
                         const prevSel = { groupId: selRef.current.groupId, entryId: selRef.current.entryId };
                         let nextGroupId = prevSel.groupId;
                         let nextEntryId = prevSel.entryId;
+                        // If selected group no longer exists (e.g., deleted on desktop), clear selection to return to group list
+                        if (nextGroupId && !(merged.groups || []).some(g => g.id === nextGroupId)) {
+                            nextGroupId = null;
+                            nextEntryId = null;
+                        }
                         const pgRaw = uiRef.current.pendingGroups || {};
                         const ensurePgObj = (val) => (val && typeof val === 'object' ? val : (val ? { realId: val } : { realId: null }));
                         // If selected temp group has a real mapping and is fully migrated, switch to real

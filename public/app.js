@@ -135,7 +135,27 @@ function handleWebSocketMessage(event) {
     const message = JSON.parse(event.data);
     if (message.type === 'full_sync') {
         const { selectedGroupId, selectedEntryId } = AppState.ui;
+        const oldData = AppState.data;
         AppState.data = message.payload;
+
+        // 如果当前所在组被其他端删除：返回组选择视图并提示
+        if (selectedGroupId && !(AppState.data.groups || []).some(g => g.id === selectedGroupId)) {
+            AppState.ui.selectedGroupId = null;
+            AppState.ui.selectedEntryId = null;
+            render();
+            // 顶部提示条
+            try {
+                const actionsEl = document.getElementById('topbar-actions');
+                if (actionsEl) {
+                    const tip = document.createElement('div');
+                    tip.className = 'ml-2 px-2 py-0.5 rounded text-xs bg-slate-600 text-slate-100';
+                    tip.textContent = '该组已在另一端删除';
+                    actionsEl.appendChild(tip);
+                    setTimeout(() => tip.remove(), 3000);
+                }
+            } catch { }
+            return;
+        }
 
         // 如果当前正在编辑的条目被远端删除（或所属组被删除），则所有端返回到条目列表
         if (easyMDE && selectedGroupId && selectedEntryId) {
@@ -810,6 +830,17 @@ function deleteGroup(id) {
             if (AppState.ui.selectedGroupId === id) {
                 AppState.ui.selectedGroupId = null;
                 AppState.ui.selectedEntryId = null;
+                // 顶部提示：已删除该组（其他端将同步删除）
+                try {
+                    const actionsEl = document.getElementById('topbar-actions');
+                    if (actionsEl) {
+                        const tip = document.createElement('div');
+                        tip.className = 'ml-2 px-2 py-0.5 rounded text-xs bg-slate-600 text-slate-100';
+                        tip.textContent = '已删除此组（其他端会同步）';
+                        actionsEl.appendChild(tip);
+                        setTimeout(() => tip.remove(), 3000);
+                    }
+                } catch { }
             }
 
             render(); // 立即重新渲染UI
