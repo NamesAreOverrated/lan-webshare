@@ -74,6 +74,10 @@ function NotesScreen({ server, onBack }) {
     const [online, setOnline] = useState(false);
     const [selectedGroup, setSelectedGroup] = useState(null);
     const [selectedEntry, setSelectedEntry] = useState(null);
+    // Track current selection in refs so we can safely remap during onSync without losing focus
+    const selRef = useRef({ groupId: null, entryId: null });
+    useEffect(() => { selRef.current.groupId = selectedGroup?.id || null; }, [selectedGroup?.id]);
+    useEffect(() => { selRef.current.entryId = selectedEntry?.id || null; }, [selectedEntry?.id]);
     // Tabs at top-level: 'notes' | 'files' (only visible when not inside a group/entry)
     const [activeTab, setActiveTab] = useState('notes');
     const [files, setFiles] = useState([]);
@@ -86,7 +90,7 @@ function NotesScreen({ server, onBack }) {
     const [selectedTags, setSelectedTags] = useState(new Set());
     const wsRef = useRef(null);
     const lastReorderAt = useRef(0);
-    const uiRef = useRef({ collapsedVolumes: {}, orders: { volume: {}, entries: {} }, pendingGroups: {}, pendingEntries: {}, pendingVolumes: {} });
+    const uiRef = useRef({ collapsedVolumes: {}, orders: { volume: {}, entries: {} }, pendingGroups: {}, pendingEntries: {}, pendingVolumes: {}, pendingVolumeDeletes: {} });
     const [search, setSearch] = useState('');
     const [loading, setLoading] = useState(true);
 
@@ -128,7 +132,7 @@ function NotesScreen({ server, onBack }) {
             }
             // load UI prefs
             const ui = await loadUI(server.host, server.port);
-            const base = { collapsedVolumes: {}, orders: { volume: {}, entries: {} }, pendingGroups: {}, pendingEntries: {}, pendingVolumes: {} };
+            const base = { collapsedVolumes: {}, orders: { volume: {}, entries: {} }, pendingGroups: {}, pendingEntries: {}, pendingVolumes: {}, pendingVolumeDeletes: {} };
             if (ui) {
                 uiRef.current = {
                     collapsedVolumes: ui.collapsedVolumes || {},
@@ -136,6 +140,7 @@ function NotesScreen({ server, onBack }) {
                     pendingGroups: ui.pendingGroups || {},
                     pendingEntries: ui.pendingEntries || {},
                     pendingVolumes: ui.pendingVolumes || {},
+                    pendingVolumeDeletes: ui.pendingVolumeDeletes || {},
                 };
             } else {
                 uiRef.current = base;
@@ -209,6 +214,23 @@ function NotesScreen({ server, onBack }) {
                                 try { const ui = uiRef.current; ui.orders.volume[refreshedSrvGroup.id] = [...realVolIds]; uiRef.current = ui; saveUI(server.host, server.port, ui).catch(() => { }); } catch { }
                             }
 
+                            // Delete extra server volumes not in desiredTitles (e.g., default volume) when user has at least one desired volume
+                            try {
+                                const pvd = uiRef.current.pendingVolumeDeletes || {};
+                                pvd[serverGroup.id] = pvd[serverGroup.id] || {};
+                                const extras = (refreshedSrvGroup.volumes || []).filter(v => !desiredTitles.includes(v.title));
+                                if ((desiredTitles || []).length > 0) {
+                                    for (const ex of extras) {
+                                        const lastTs = pvd[serverGroup.id][ex.id] || 0;
+                                        if (Date.now() - lastTs > 1500) {
+                                            send('delete_volume', { groupId: refreshedSrvGroup.id, volumeId: ex.id });
+                                            pvd[serverGroup.id][ex.id] = Date.now();
+                                        }
+                                    }
+                                }
+                                uiRef.current.pendingVolumeDeletes = pvd; await saveUI(server.host, server.port, uiRef.current).catch(() => { });
+                            } catch { }
+
                             // Create missing entries with correct volume mapping (by title). Avoid duplicates using title+createdAt.
                             const srvEntries = new Map((serverGroup.entries || []).map(e => [`${e.title}@@${e.createdAt}`, e]));
                             const pendingEntrySends = uiRef.current.pendingEntries || {};
@@ -276,9 +298,68 @@ function NotesScreen({ server, onBack }) {
                         }
                         uiRef.current.pendingEntries = pendingEntrySends; await saveUI(server.host, server.port, uiRef.current).catch(() => { });
                     } catch { }
-                    // merge local order overlay
+                    // Build merged from payload, then augment with local pending groups/entries to avoid losing focus
                     const overlay = uiRef.current?.orders || { volume: {}, entries: {} };
-                    const merged = JSON.parse(JSON.stringify(payload));
+                    let merged = JSON.parse(JSON.stringify(payload));
+                    try {
+                        const local = dataRef.current || { groups: [], tags: [] };
+                        const pgRaw = uiRef.current.pendingGroups || {};
+                        const ensurePgObj = (val) => (val && typeof val === 'object' ? val : (val ? { realId: val } : { realId: null }));
+                        // Helper: determine if a temp group has been fully migrated to a real server group
+                        const isFullyMigrated = (tempGroup, serverGroup) => {
+                            if (!serverGroup) return false;
+                            const desiredTitles = (tempGroup?.volumes || []).map(v => v.title);
+                            const realTitles = new Set((serverGroup?.volumes || []).map(v => v.title));
+                            const volsDone = desiredTitles.every(t => realTitles.has(t));
+                            const serverKeySet = new Set((serverGroup?.entries || []).map(e => `${e.title}@@${e.createdAt}`));
+                            const entriesDone = (tempGroup?.entries || []).every(te => serverKeySet.has(`${te.title}@@${te.createdAt}`));
+                            return volsDone && entriesDone;
+                        };
+                        // 1) Keep temp groups visible until fully migrated
+                        const tempGroups = (local.groups || []).filter(g => String(g.id).startsWith('temp-group-'));
+                        for (const tg of tempGroups) {
+                            const pg = ensurePgObj(pgRaw[tg.id]);
+                            const real = pg.realId ? (merged.groups || []).find(sg => sg.id === pg.realId) : null;
+                            if (!real || !isFullyMigrated(tg, real)) {
+                                // include temp group as-is so user doesn't lose context
+                                merged.groups = Array.isArray(merged.groups) ? merged.groups : [];
+                                // Avoid duplicate temp if already present
+                                if (!merged.groups.some(g => g.id === tg.id)) {
+                                    merged.groups.unshift(JSON.parse(JSON.stringify(tg)));
+                                }
+                            }
+                        }
+                        // 2) Keep temp entries inside real groups visible until server creates them
+                        for (const lg of (local.groups || [])) {
+                            if (String(lg.id).startsWith('temp-group-')) continue; // handled above
+                            const sg = (merged.groups || []).find(x => x.id === lg.id);
+                            if (!sg) continue;
+                            const serverKeySet = new Set((sg.entries || []).map(e => `${e.title}@@${e.createdAt}`));
+                            const tempEntries = (lg.entries || []).filter(e => String(e.id).startsWith('temp'));
+                            if (tempEntries.length) {
+                                sg.entries = Array.isArray(sg.entries) ? sg.entries : [];
+                                for (const te of tempEntries) {
+                                    const key = `${te.title}@@${te.createdAt}`;
+                                    if (!serverKeySet.has(key) && !sg.entries.some(e => e.id === te.id)) {
+                                        sg.entries.push(JSON.parse(JSON.stringify(te)));
+                                        // Also reflect it in the corresponding volume's entryIds for UI
+                                        const fromV = (lg.volumes || []).find(v => (v.entryIds || []).includes(te.id));
+                                        const volId = fromV?.id;
+                                        const sv = (sg.volumes || []).find(v => v.id === volId);
+                                        if (sv) {
+                                            sv.entryIds = Array.isArray(sv.entryIds) ? sv.entryIds : [];
+                                            if (!sv.entryIds.includes(te.id)) sv.entryIds.unshift(te.id);
+                                        } else if (Array.isArray(sg.volumes) && sg.volumes.length) {
+                                            // fallback: place into first volume to keep it visible
+                                            const f = sg.volumes[0];
+                                            f.entryIds = Array.isArray(f.entryIds) ? f.entryIds : [];
+                                            if (!f.entryIds.includes(te.id)) f.entryIds.unshift(te.id);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch { }
                     try {
                         for (const g of merged.groups || []) {
                             // If this group is mapped from a temp group, also honor the temp group's title-based order
@@ -358,6 +439,52 @@ function NotesScreen({ server, onBack }) {
                                 }
                             }
                         }
+                    } catch { }
+
+                    // After merging and overlay, remap selection to avoid losing focus
+                    try {
+                        const local = dataRef.current || { groups: [], tags: [] };
+                        const prevSel = { groupId: selRef.current.groupId, entryId: selRef.current.entryId };
+                        let nextGroupId = prevSel.groupId;
+                        let nextEntryId = prevSel.entryId;
+                        const pgRaw = uiRef.current.pendingGroups || {};
+                        const ensurePgObj = (val) => (val && typeof val === 'object' ? val : (val ? { realId: val } : { realId: null }));
+                        // If selected temp group has a real mapping and is fully migrated, switch to real
+                        if (nextGroupId && String(nextGroupId).startsWith('temp-group-')) {
+                            const pg = ensurePgObj(pgRaw[nextGroupId]);
+                            const real = pg?.realId ? (merged.groups || []).find(g => g.id === pg.realId) : null;
+                            // Check migration state against local temp group
+                            const tempGroup = (local.groups || []).find(g => g.id === nextGroupId);
+                            const isDone = tempGroup && real ? (() => {
+                                const desiredTitles = (tempGroup.volumes || []).map(v => v.title);
+                                const realTitles = new Set((real.volumes || []).map(v => v.title));
+                                const volsDone = desiredTitles.every(t => realTitles.has(t));
+                                const serverKeySet = new Set((real.entries || []).map(e => `${e.title}@@${e.createdAt}`));
+                                const entriesDone = (tempGroup.entries || []).every(te => serverKeySet.has(`${te.title}@@${te.createdAt}`));
+                                return volsDone && entriesDone;
+                            })() : false;
+                            if (pg?.realId && real && isDone) {
+                                nextGroupId = pg.realId;
+                            }
+                        }
+                        // If selected temp entry now exists on server, switch to real id
+                        if (nextEntryId && String(nextEntryId).startsWith('temp')) {
+                            // Determine current group context for the editor/list
+                            const g = (merged.groups || []).find(x => x.id === nextGroupId);
+                            if (g) {
+                                // Find temp entry details from local state to compute key
+                                const localGroup = (local.groups || []).find(x => x.id === selRef.current.groupId) || (local.groups || []).find(x => x.id === nextGroupId);
+                                const localEntry = (localGroup?.entries || []).find(e => e.id === nextEntryId);
+                                const key = localEntry ? `${localEntry.title}@@${localEntry.createdAt}` : null;
+                                if (key) {
+                                    const real = (g.entries || []).find(e => `${e.title}@@${e.createdAt}` === key && !String(e.id).startsWith('temp'));
+                                    if (real) nextEntryId = real.id;
+                                }
+                            }
+                        }
+                        // Apply remapped selection if changed
+                        if (prevSel.groupId !== nextGroupId) setSelectedGroup(nextGroupId ? { id: nextGroupId } : null);
+                        if (prevSel.entryId !== nextEntryId) setSelectedEntry(nextEntryId ? { id: nextEntryId } : null);
                     } catch { }
 
                     if (justReordered && ordersEqual(dataRef.current, merged)) {
