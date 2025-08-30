@@ -140,7 +140,7 @@ function NotesScreen({ server, onBack }) {
             return { start: clamp(sel.start), end: clamp(sel.end) };
         }
     };
-    const editRef = useRef({ isApplyingRemoteUpdate: false, lastLocalEditAt: 0, lastTitleEditAt: 0, editorFocused: false, titleFocused: false, saveTimer: null });
+    const editRef = useRef({ isApplyingRemoteUpdate: false, lastLocalEditAt: 0, lastTitleEditAt: 0, editorFocused: false, titleFocused: false, saveTimer: null, lastFlushAt: 0 });
     useEffect(() => {
         // when entry switches, update inputs and clear pending timers
         if (editRef.current.saveTimer) { clearTimeout(editRef.current.saveTimer); editRef.current.saveTimer = null; }
@@ -878,15 +878,27 @@ function NotesScreen({ server, onBack }) {
         });
     };
 
-    // Autosave: debounce title/content changes
-    const scheduleAutosave = () => {
+    // Autosave with leading throttle + trailing debounce for more real-time sync while typing
+    const scheduleAutosave = (opts = {}) => {
         if (!group || !entry) return;
         if (editRef.current.isApplyingRemoteUpdate) return; // skip saving when applying remote
+        const now = Date.now();
+        const minGap = 350; // leading flush throttle window
+        const forceImmediate = !!opts.immediate;
+        const canFlushNow = forceImmediate || (now - (editRef.current.lastFlushAt || 0) > minGap);
+        if (canFlushNow) {
+            if (editRef.current.saveTimer) { clearTimeout(editRef.current.saveTimer); editRef.current.saveTimer = null; }
+            editRef.current.lastFlushAt = now;
+            updateEntry(group.id, entry.id, title, content);
+            return;
+        }
+        // schedule trailing debounce as fallback
         if (editRef.current.saveTimer) clearTimeout(editRef.current.saveTimer);
         editRef.current.saveTimer = setTimeout(() => {
             editRef.current.saveTimer = null;
+            editRef.current.lastFlushAt = Date.now();
             updateEntry(group.id, entry.id, title, content);
-        }, 700);
+        }, 600);
     };
 
     const groups = useMemo(() => (data.groups || []).sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt)), [data]);
@@ -1386,13 +1398,13 @@ function NotesScreen({ server, onBack }) {
         <SafeAreaView style={{ flex: 1, backgroundColor: '#0f172a' }}>
             <StatusBar style="light" />
             <View style={{ padding: 12, flexDirection: 'row', alignItems: 'center' }}>
-                <TouchableOpacity onPress={() => { if (editRef.current.saveTimer) { clearTimeout(editRef.current.saveTimer); editRef.current.saveTimer = null; } setSelectedEntry(null); }}><Text style={{ color: '#93c5fd' }}>← 返回</Text></TouchableOpacity>
-                <TextInput value={title} onChangeText={(t) => { setTitle(t); editRef.current.lastTitleEditAt = Date.now(); scheduleAutosave(); }} placeholder='标题' placeholderTextColor="#64748b" onFocus={() => { editRef.current.titleFocused = true; }} onBlur={() => { editRef.current.titleFocused = false; }}
+                <TouchableOpacity onPress={() => { scheduleAutosave({ immediate: true }); if (editRef.current.saveTimer) { clearTimeout(editRef.current.saveTimer); editRef.current.saveTimer = null; } setSelectedEntry(null); }}><Text style={{ color: '#93c5fd' }}>← 返回</Text></TouchableOpacity>
+                <TextInput value={title} onChangeText={(t) => { setTitle(t); editRef.current.lastTitleEditAt = Date.now(); scheduleAutosave(); }} placeholder='标题' placeholderTextColor="#64748b" onFocus={() => { editRef.current.titleFocused = true; }} onBlur={() => { editRef.current.titleFocused = false; scheduleAutosave({ immediate: true }); }}
                     style={{ marginLeft: 12, flex: 1, borderColor: '#334155', borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, color: 'white' }} />
                 {/* autosave; no explicit Save button */}
             </View>
             <View style={{ padding: 12, flex: 1 }}>
-                <TextInput value={content} selection={forcedSel || undefined} onSelectionChange={(e) => { const s = e?.nativeEvent?.selection; if (!editRef.current.isApplyingRemoteUpdate && s && typeof s.start === 'number' && typeof s.end === 'number') { caretRef.current = s; } }} onChangeText={(t) => { setContent(t); editRef.current.lastLocalEditAt = Date.now(); scheduleAutosave(); }} multiline textAlignVertical='top' placeholder='内容' scrollEnabled onFocus={() => { editRef.current.editorFocused = true; }} onBlur={() => { editRef.current.editorFocused = false; }}
+                <TextInput value={content} selection={forcedSel || undefined} onSelectionChange={(e) => { const s = e?.nativeEvent?.selection; if (!editRef.current.isApplyingRemoteUpdate && s && typeof s.start === 'number' && typeof s.end === 'number') { caretRef.current = s; } }} onChangeText={(t) => { setContent(t); editRef.current.lastLocalEditAt = Date.now(); scheduleAutosave(); }} multiline textAlignVertical='top' placeholder='内容' scrollEnabled onFocus={() => { editRef.current.editorFocused = true; }} onBlur={() => { editRef.current.editorFocused = false; scheduleAutosave({ immediate: true }); }}
                     placeholderTextColor="#475569" style={{ flex: 1, color: 'white', borderColor: '#334155', borderWidth: 1, borderRadius: 8, padding: 12, minHeight: 300 }} />
             </View>
         </SafeAreaView>
