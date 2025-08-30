@@ -154,14 +154,10 @@ function handleWebSocketMessage(event) {
             // 条目仍存在，按原逻辑处理内容与标题同步
             const cm = easyMDE.codemirror;
             const prevVal = easyMDE.value();
-            let conflict = false;
-
+            // 自动应用远端更新：若最近未输入则直接应用，同时保留光标与滚动
             if (newEntry.content !== prevVal) {
-                const isFocused = !!AppState.ui.isEditorFocused;
-                const recentlyEdited = Date.now() - (AppState.ui.lastLocalEditAt || 0) < 1000;
-                if (isFocused || recentlyEdited) {
-                    conflict = true;
-                } else {
+                const recentlyEdited = Date.now() - (AppState.ui.lastLocalEditAt || 0) < 900;
+                if (!recentlyEdited) {
                     const sel = cm.listSelections();
                     const scrollInfo = cm.getScrollInfo();
                     AppState.ui.isApplyingRemoteUpdate = true;
@@ -172,18 +168,19 @@ function handleWebSocketMessage(event) {
                 }
             }
 
-            // 标题使用与内容相同的机制，避免编辑时被覆盖
+            // 标题：若最近未编辑则直接覆盖输入框值
             const titleInput = document.getElementById('entry-title-input');
             if (titleInput && newEntry.title !== titleInput.value) {
-                const titleFocused = !!AppState.ui.isTitleFocused;
-                const titleRecentlyEdited = Date.now() - (AppState.ui.lastTitleEditAt || 0) < 1000;
-                if (titleFocused || titleRecentlyEdited) {
-                    conflict = true;
+                const titleRecentlyEdited = Date.now() - (AppState.ui.lastTitleEditAt || 0) < 800;
+                if (!titleRecentlyEdited && !AppState.ui.isTitleFocused) {
+                    const start = titleInput.selectionStart;
+                    const end = titleInput.selectionEnd;
+                    titleInput.value = newEntry.title || '';
+                    try { titleInput.setSelectionRange(start, end); } catch { }
                 }
-                // 否则在 renderTopBar 中安全更新标题值
             }
 
-            AppState.ui.hasRemoteUpdateConflict = conflict;
+            AppState.ui.hasRemoteUpdateConflict = false;
             render(true);
             requestAnimationFrame(refreshEditorSize);
         } else {
@@ -498,17 +495,7 @@ function renderEditor() {
                     else el.innerHTML = new Date(ts).toLocaleTimeString();
                 }
             },
-            {
-                className: 'conflict-info',
-                defaultValue: (el) => { el.innerHTML = ''; },
-                onUpdate: (el) => {
-                    if (AppState?.ui?.hasRemoteUpdateConflict) {
-                        el.innerHTML = '<span class="text-amber-400">检测到远端更新</span> <button class="ml-1 px-2 py-0.5 rounded bg-indigo-600 text-white hover:bg-indigo-700" onclick="applyRemoteUpdateNow()">应用</button>';
-                    } else {
-                        el.innerHTML = '';
-                    }
-                }
-            }
+            // 去除“检测到远端更新”提示，自动应用
         ],
         // 更新工具栏：移除 side-by-side 与 fullscreen，增加实用按钮和自定义“Tab”键
         toolbar: [

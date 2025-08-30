@@ -83,7 +83,7 @@ function NotesScreen({ server, onBack }) {
     const [files, setFiles] = useState([]);
     const [filesLoading, setFilesLoading] = useState(false);
     const [prompt, setPrompt] = useState({ visible: false, title: '', placeholder: '', value: '', onConfirm: null });
-    const [groupModal, setGroupModal] = useState({ visible: false, title: '', tags: '' });
+    const [groupModal, setGroupModal] = useState({ visible: false, title: '', tags: '', mode: 'create', groupId: null });
     const [moveDialog, setMoveDialog] = useState({ visible: false, entryId: null, fromVolumeId: null });
     const [actionSheet, setActionSheet] = useState({ visible: false, groupId: null, volumeId: null, entryId: null });
     const [pickVolume, setPickVolume] = useState({ visible: false, groupId: null });
@@ -99,7 +99,63 @@ function NotesScreen({ server, onBack }) {
     const entry = useMemo(() => group?.entries.find(e => e.id === selectedEntry?.id), [group, selectedEntry?.id]);
     const [title, setTitle] = useState(entry?.title || '');
     const [content, setContent] = useState(entry?.content || '');
-    useEffect(() => { setTitle(entry?.title || ''); setContent(entry?.content || ''); }, [entry?.id]);
+    const caretRef = useRef({ start: 0, end: 0 });
+    const [forcedSel, setForcedSel] = useState(null);
+    const valueRef = useRef({ title: '', content: '' });
+    useEffect(() => { valueRef.current.title = title; }, [title]);
+    useEffect(() => { valueRef.current.content = content; }, [content]);
+    // Map previous selection to new text by accounting for a single contiguous diff between old and new text.
+    const adjustSelectionForDiff = (oldText, newText, sel) => {
+        try {
+            const oldStr = String(oldText || '');
+            const newStr = String(newText || '');
+            if (oldStr === newStr) return { start: sel.start || 0, end: sel.end || 0 };
+            const oldLen = oldStr.length;
+            const newLen = newStr.length;
+            let prefix = 0;
+            const minLen = Math.min(oldLen, newLen);
+            while (prefix < minLen && oldStr.charCodeAt(prefix) === newStr.charCodeAt(prefix)) prefix++;
+            let suffix = 0;
+            while (
+                suffix < (minLen - prefix) &&
+                oldStr.charCodeAt(oldLen - 1 - suffix) === newStr.charCodeAt(newLen - 1 - suffix)
+            ) suffix++;
+            const delta = newLen - oldLen;
+            const oldChangedEnd = oldLen - suffix;
+            const newChangedEnd = newLen - suffix;
+            const mapPos = (p) => {
+                const pos = Math.max(0, Math.min(oldLen, p || 0));
+                if (pos <= prefix) return pos;
+                if (pos >= oldChangedEnd) return pos + delta;
+                // inside changed region → snap to end of inserted segment
+                return newChangedEnd;
+            };
+            const ns = { start: mapPos(sel.start), end: mapPos(sel.end) };
+            // clamp to new text length
+            const clamp = (n) => Math.max(0, Math.min(newLen, n || 0));
+            ns.start = clamp(ns.start); ns.end = clamp(ns.end);
+            return ns;
+        } catch {
+            const len = (newText || '').length; const clamp = (n) => Math.max(0, Math.min(len, n || 0));
+            return { start: clamp(sel.start), end: clamp(sel.end) };
+        }
+    };
+    const editRef = useRef({ isApplyingRemoteUpdate: false, lastLocalEditAt: 0, lastTitleEditAt: 0, editorFocused: false, titleFocused: false, saveTimer: null });
+    useEffect(() => {
+        // when entry switches, update inputs and clear pending timers
+        if (editRef.current.saveTimer) { clearTimeout(editRef.current.saveTimer); editRef.current.saveTimer = null; }
+        setTitle(entry?.title || '');
+        const nextContent = entry?.content || '';
+        setContent(nextContent);
+        // reset caret to end for new entry; force once then release control
+        try {
+            const end = (nextContent || '').length;
+            caretRef.current = { start: end, end };
+            setForcedSel({ start: end, end });
+            setTimeout(() => setForcedSel(null), 60);
+        } catch { }
+        editRef.current.lastLocalEditAt = 0; editRef.current.lastTitleEditAt = 0;
+    }, [entry?.id]);
 
     // 比较器：仅比较组/卷/条目顺序是否相同（用于抑制拖拽后的冗余刷新）
     const ordersEqual = (a, b) => {
@@ -495,6 +551,40 @@ function NotesScreen({ server, onBack }) {
                     setData(merged);
                     await saveData(server.host, server.port, merged).catch(() => { });
                     setLoading(false);
+                    // If in editor for the selected entry, apply remote updates when safe (no recent local edits/focus)
+                    try {
+                        if (selRef.current.groupId && selRef.current.entryId) {
+                            const gNow = (merged.groups || []).find(x => x.id === selRef.current.groupId);
+                            const eNow = gNow?.entries?.find(x => x.id === selRef.current.entryId);
+                            if (eNow) {
+                                const nowMs = Date.now();
+                                const recentlyTyping = nowMs - (editRef.current.lastLocalEditAt || 0) < 1000;
+                                const recentlyTitle = nowMs - (editRef.current.lastTitleEditAt || 0) < 800;
+                                // Apply remote updates when user hasn't typed recently, regardless of focus
+                                if (!recentlyTyping && !recentlyTitle) {
+                                    if (eNow.content !== (valueRef.current.content ?? '') || eNow.title !== (valueRef.current.title ?? '')) {
+                                        editRef.current.isApplyingRemoteUpdate = true;
+                                        const prevSel = caretRef.current || { start: 0, end: 0 };
+                                        const oldText = valueRef.current.content ?? '';
+                                        const newText = eNow.content || '';
+                                        setTitle(eNow.title || '');
+                                        setContent(newText);
+                                        // preserve caret range with diff-based offset when editor is focused
+                                        try {
+                                            if (editRef.current.editorFocused) {
+                                                const target = adjustSelectionForDiff(oldText, newText, prevSel);
+                                                caretRef.current = target;
+                                                // force selection briefly after content update then release
+                                                setTimeout(() => { setForcedSel(target); setTimeout(() => setForcedSel(null), 80); }, 0);
+                                            }
+                                        } catch { }
+                                        // small timeout to avoid immediate autosave feedback
+                                        setTimeout(() => { editRef.current.isApplyingRemoteUpdate = false; }, 50);
+                                    }
+                                }
+                            }
+                        }
+                    } catch { }
                     // Push reorder only when merged order actually differs from server payload
                     try {
                         const serverGroups = payload.groups || [];
@@ -536,25 +626,45 @@ function NotesScreen({ server, onBack }) {
         wsRef.current.send(type, payload);
     };
 
-    const createGroup = () => { setGroupModal({ visible: true, title: '', tags: '' }); };
-    const confirmCreateGroup = () => {
-        const t = (groupModal.title || '').trim() || '新建组';
+    const createGroup = () => { setGroupModal({ visible: true, title: '', tags: '', mode: 'create', groupId: null }); };
+    const confirmGroupModal = () => {
+        const t = (groupModal.title || '').trim() || (groupModal.mode === 'edit' ? '未命名组' : '新建组');
         const tags = (groupModal.tags || '').split(',').map(s => s.trim()).filter(Boolean);
-        setGroupModal({ visible: false, title: '', tags: '' });
-        setData(prev => {
-            const now = new Date().toISOString();
-            const tempVolId = `temp-vol-${Date.now()}`;
-            const tempG = { id: `temp-group-${Date.now()}`, title: t, tags, entries: [], volumes: [{ id: tempVolId, title: '默认分组', entryIds: [] }], createdAt: now, updatedAt: now };
-            const next = { ...prev, groups: [tempG, ...(prev.groups || [])], tags: Array.from(new Set([...(prev.tags || []), ...tags])) };
-            try {
-                const ui = uiRef.current; ui.orders.volume[tempG.id] = [tempVolId]; uiRef.current = ui; saveUI(server.host, server.port, ui).catch(() => { });
-                // mark pending group for reconciliation
-                const ui2 = uiRef.current; ui2.pendingGroups = ui2.pendingGroups || {}; ui2.pendingGroups[tempG.id] = { realId: null, createSentTs: 0 }; uiRef.current = ui2; saveUI(server.host, server.port, ui2).catch(() => { });
-            } catch { }
-            saveData(server.host, server.port, next).catch(() => { });
-            return next;
-        });
-        if (online) send('create_group', { title: t, tags });
+        const close = () => setGroupModal({ visible: false, title: '', tags: '', mode: 'create', groupId: null });
+        if (groupModal.mode === 'create') {
+            close();
+            setData(prev => {
+                const now = new Date().toISOString();
+                const tempVolId = `temp-vol-${Date.now()}`;
+                const tempG = { id: `temp-group-${Date.now()}`, title: t, tags, entries: [], volumes: [{ id: tempVolId, title: '默认分组', entryIds: [] }], createdAt: now, updatedAt: now };
+                const next = { ...prev, groups: [tempG, ...(prev.groups || [])], tags: Array.from(new Set([...(prev.tags || []), ...tags])) };
+                try {
+                    const ui = uiRef.current; ui.orders.volume[tempG.id] = [tempVolId]; uiRef.current = ui; saveUI(server.host, server.port, ui).catch(() => { });
+                    // mark pending group for reconciliation
+                    const ui2 = uiRef.current; ui2.pendingGroups = ui2.pendingGroups || {}; ui2.pendingGroups[tempG.id] = { realId: null, createSentTs: 0 }; uiRef.current = ui2; saveUI(server.host, server.port, ui2).catch(() => { });
+                } catch { }
+                saveData(server.host, server.port, next).catch(() => { });
+                return next;
+            });
+            if (online) send('create_group', { title: t, tags });
+        } else {
+            // edit existing group
+            const gid = groupModal.groupId;
+            close();
+            setData(prev => {
+                const next = JSON.parse(JSON.stringify(prev || { groups: [], tags: [] }));
+                const g = (next.groups || []).find(x => x.id === gid);
+                const now = new Date().toISOString();
+                if (g) { g.title = t; g.tags = tags; g.updatedAt = now; }
+                // maintain global tags union
+                next.tags = Array.from(new Set([...(next.tags || []), ...tags]));
+                saveData(server.host, server.port, next).catch(() => { });
+                return next;
+            });
+            if (!String(gid).startsWith('temp-group-')) {
+                send('update_group', { id: gid, title: t, tags, updatedAt: new Date().toISOString() });
+            }
+        }
     };
 
     const createEntryInVolume = (groupId, volumeId) => {
@@ -667,42 +777,8 @@ function NotesScreen({ server, onBack }) {
     };
 
     const renameGroup = (group) => {
-        if (Alert.prompt) {
-            Alert.prompt('重命名组', '输入新的组名', text => {
-                const newTitle = (text || '').trim() || group.title || '未命名组';
-                if (String(group.id).startsWith('temp-group-')) {
-                    // local-only update; reconciliation will create a server group with this title
-                    setData(prev => {
-                        const next = JSON.parse(JSON.stringify(prev));
-                        const g = next.groups.find(x => x.id === group.id); if (g) { g.title = newTitle; g.updatedAt = new Date().toISOString(); }
-                        saveData(server.host, server.port, next).catch(() => { });
-                        return next;
-                    });
-                } else {
-                    send('update_group', { id: group.id, title: newTitle, tags: group.tags || [], updatedAt: new Date().toISOString() });
-                }
-            });
-            return;
-        }
-        setPrompt({
-            visible: true,
-            title: '重命名组',
-            placeholder: '新的组名',
-            value: group.title || '',
-            onConfirm: (val) => {
-                const newTitle = (val || '').trim() || group.title || '未命名组';
-                if (String(group.id).startsWith('temp-group-')) {
-                    setData(prev => {
-                        const next = JSON.parse(JSON.stringify(prev));
-                        const g = next.groups.find(x => x.id === group.id); if (g) { g.title = newTitle; g.updatedAt = new Date().toISOString(); }
-                        saveData(server.host, server.port, next).catch(() => { });
-                        return next;
-                    });
-                } else {
-                    send('update_group', { id: group.id, title: newTitle, tags: group.tags || [], updatedAt: new Date().toISOString() });
-                }
-            }
-        });
+        // Use the group modal to edit name + tags
+        setGroupModal({ visible: true, title: group.title || '', tags: (group.tags || []).join(','), mode: 'edit', groupId: group.id });
     };
 
     const deleteGroup = (group) => {
@@ -773,16 +849,16 @@ function NotesScreen({ server, onBack }) {
             const localTemp = localGroup?.entries?.find(e => e.id === entryId);
             const createdAt = localTemp?.createdAt || updatedAt;
             if (!String(groupId).startsWith('temp-group-')) {
-                // Avoid duplicate create if reconciliation just sent it
-                try {
-                    const key = `${title}@@${createdAt}`;
-                    const pendingEntrySends = uiRef.current.pendingEntries || {};
-                    const lastTs = pendingEntrySends[key] || 0;
-                    if (Date.now() - lastTs > 1200) {
+                // Avoid duplicate creates: only send once per temp entry id
+                const tec = uiRef.current.tempEntryCreateSent || {}; uiRef.current.tempEntryCreateSent = tec;
+                const sentTs = tec[entryId] || 0;
+                if (!sentTs || Date.now() - sentTs > 60_000) { // resend at most after 60s if still not materialized
+                    try {
                         send('create_entry_with_content', { groupId, volumeId: volId, title, content, createdAt, updatedAt });
-                        pendingEntrySends[key] = Date.now(); uiRef.current.pendingEntries = pendingEntrySends; saveUI(server.host, server.port, uiRef.current).catch(() => { });
-                    }
-                } catch { send('create_entry_with_content', { groupId, volumeId: volId, title, content, createdAt, updatedAt }); }
+                        tec[entryId] = Date.now();
+                        saveUI(server.host, server.port, uiRef.current).catch(() => { });
+                    } catch { }
+                }
             }
         } else {
             // send or queue update for existing entry
@@ -800,6 +876,17 @@ function NotesScreen({ server, onBack }) {
             saveData(server.host, server.port, next).catch(() => { });
             return next;
         });
+    };
+
+    // Autosave: debounce title/content changes
+    const scheduleAutosave = () => {
+        if (!group || !entry) return;
+        if (editRef.current.isApplyingRemoteUpdate) return; // skip saving when applying remote
+        if (editRef.current.saveTimer) clearTimeout(editRef.current.saveTimer);
+        editRef.current.saveTimer = setTimeout(() => {
+            editRef.current.saveTimer = null;
+            updateEntry(group.id, entry.id, title, content);
+        }, 700);
     };
 
     const groups = useMemo(() => (data.groups || []).sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt)), [data]);
@@ -877,25 +964,12 @@ function NotesScreen({ server, onBack }) {
         });
     };
     const renameVolume = (group, volume) => {
-        if (Alert.prompt) {
-            Alert.prompt('重命名卷', '输入新的卷标题', text => {
-                const newTitle = (text || '').trim() || volume.title;
-                if (String(group.id).startsWith('temp-group-')) {
-                    setData(prev => { const next = JSON.parse(JSON.stringify(prev)); const g = next.groups.find(x => x.id === group.id); const v = g?.volumes?.find(v => v.id === volume.id); if (v) { v.title = newTitle; g.updatedAt = new Date().toISOString(); } saveData(server.host, server.port, next).catch(() => { }); return next; });
-                } else {
-                    send('update_volume', { groupId: group.id, volumeId: volume.id, title: newTitle });
-                }
-            });
-            return;
-        }
         setPrompt({
             visible: true, title: '重命名卷', placeholder: '卷标题', value: volume.title || '', onConfirm: (val) => {
                 const newTitle = (val || '').trim() || volume.title;
-                if (String(group.id).startsWith('temp-group-')) {
-                    setData(prev => { const next = JSON.parse(JSON.stringify(prev)); const g = next.groups.find(x => x.id === group.id); const v = g?.volumes?.find(v => v.id === volume.id); if (v) { v.title = newTitle; g.updatedAt = new Date().toISOString(); } saveData(server.host, server.port, next).catch(() => { }); return next; });
-                } else {
-                    send('update_volume', { groupId: group.id, volumeId: volume.id, title: newTitle });
-                }
+                // optimistic update
+                setData(prev => { const next = JSON.parse(JSON.stringify(prev)); const g = next.groups.find(x => x.id === group.id); const v = g?.volumes?.find(v => v.id === volume.id); if (v) { v.title = newTitle; g.updatedAt = new Date().toISOString(); } saveData(server.host, server.port, next).catch(() => { }); return next; });
+                if (!String(group.id).startsWith('temp-group-')) { send('update_volume', { groupId: group.id, volumeId: volume.id, title: newTitle }); }
             }
         });
     };
@@ -1085,7 +1159,7 @@ function NotesScreen({ server, onBack }) {
                                         <Text style={{ color: '#94a3b8', marginTop: 4 }}>{(g.entries || []).length} 条目</Text>
                                     </TouchableOpacity>
                                     <View style={{ flexDirection: 'row', gap: 12, marginTop: 10 }}>
-                                        <TouchableOpacity onPress={() => renameGroup(g)}><Text style={{ color: '#93c5fd' }}>重命名</Text></TouchableOpacity>
+                                        <TouchableOpacity onPress={() => renameGroup(g)}><Text style={{ color: '#93c5fd' }}>编辑</Text></TouchableOpacity>
                                         <TouchableOpacity onPress={() => deleteGroup(g)}><Text style={{ color: '#ef4444' }}>删除</Text></TouchableOpacity>
                                     </View>
                                 </View>
@@ -1120,7 +1194,7 @@ function NotesScreen({ server, onBack }) {
                 {groupModal.visible && (
                     <View style={{ position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', padding: 24 }}>
                         <View style={{ backgroundColor: '#0f172a', borderRadius: 12, padding: 16, borderColor: '#334155', borderWidth: 1 }}>
-                            <Text style={{ color: 'white', fontSize: 18, fontWeight: '700', marginBottom: 12 }}>新建组</Text>
+                            <Text style={{ color: 'white', fontSize: 18, fontWeight: '700', marginBottom: 12 }}>{groupModal.mode === 'edit' ? '编辑组' : '新建组'}</Text>
                             <TextInput autoFocus value={groupModal.title} onChangeText={(t) => setGroupModal(s => ({ ...s, title: t }))} placeholder={'组名称'} placeholderTextColor="#64748b"
                                 style={{ color: 'white', borderColor: '#334155', borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10 }} />
                             <View style={{ height: 10 }} />
@@ -1128,8 +1202,8 @@ function NotesScreen({ server, onBack }) {
                                 style={{ color: 'white', borderColor: '#334155', borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10 }} />
                             <View style={{ height: 12 }} />
                             <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 8 }}>
-                                <Button title="取消" onPress={() => setGroupModal({ visible: false, title: '', tags: '' })} style={{ backgroundColor: '#334155' }} />
-                                <Button title="确定" onPress={confirmCreateGroup} />
+                                <Button title="取消" onPress={() => setGroupModal({ visible: false, title: '', tags: '', mode: 'create', groupId: null })} style={{ backgroundColor: '#334155' }} />
+                                <Button title="确定" onPress={confirmGroupModal} />
                             </View>
                         </View>
                     </View>
@@ -1312,15 +1386,13 @@ function NotesScreen({ server, onBack }) {
         <SafeAreaView style={{ flex: 1, backgroundColor: '#0f172a' }}>
             <StatusBar style="light" />
             <View style={{ padding: 12, flexDirection: 'row', alignItems: 'center' }}>
-                <TouchableOpacity onPress={() => setSelectedEntry(null)}><Text style={{ color: '#93c5fd' }}>← 返回</Text></TouchableOpacity>
-                <TextInput value={title} onChangeText={setTitle} placeholder='标题' placeholderTextColor="#64748b"
+                <TouchableOpacity onPress={() => { if (editRef.current.saveTimer) { clearTimeout(editRef.current.saveTimer); editRef.current.saveTimer = null; } setSelectedEntry(null); }}><Text style={{ color: '#93c5fd' }}>← 返回</Text></TouchableOpacity>
+                <TextInput value={title} onChangeText={(t) => { setTitle(t); editRef.current.lastTitleEditAt = Date.now(); scheduleAutosave(); }} placeholder='标题' placeholderTextColor="#64748b" onFocus={() => { editRef.current.titleFocused = true; }} onBlur={() => { editRef.current.titleFocused = false; }}
                     style={{ marginLeft: 12, flex: 1, borderColor: '#334155', borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, color: 'white' }} />
-                <View style={{ marginLeft: 8 }}>
-                    <Button title="保存" onPress={() => updateEntry(group.id, entry.id, title, content)} />
-                </View>
+                {/* autosave; no explicit Save button */}
             </View>
             <View style={{ padding: 12, flex: 1 }}>
-                <TextInput value={content} onChangeText={setContent} multiline textAlignVertical='top' placeholder='内容' scrollEnabled
+                <TextInput value={content} selection={forcedSel || undefined} onSelectionChange={(e) => { const s = e?.nativeEvent?.selection; if (!editRef.current.isApplyingRemoteUpdate && s && typeof s.start === 'number' && typeof s.end === 'number') { caretRef.current = s; } }} onChangeText={(t) => { setContent(t); editRef.current.lastLocalEditAt = Date.now(); scheduleAutosave(); }} multiline textAlignVertical='top' placeholder='内容' scrollEnabled onFocus={() => { editRef.current.editorFocused = true; }} onBlur={() => { editRef.current.editorFocused = false; }}
                     placeholderTextColor="#475569" style={{ flex: 1, color: 'white', borderColor: '#334155', borderWidth: 1, borderRadius: 8, padding: 12, minHeight: 300 }} />
             </View>
         </SafeAreaView>

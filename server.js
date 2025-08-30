@@ -202,6 +202,7 @@ function createServerInstance() {
                                     entry.content = payload.content;
                                     entry.updatedAt = incoming;
                                     group.updatedAt = incoming;
+                                    dirty = true;
                                 }
                             }
                         }
