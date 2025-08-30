@@ -17,7 +17,7 @@ let started = false;
 // Paths can be overridden via environment variables to place data under Electron userData
 let DB_PATH = process.env.DB_PATH || path.join(__dirname, 'db.json');
 let UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, 'uploads');
-let data = { groups: [], tags: [] };
+let data = { groups: [], tags: [], shares: [] };
 // write queue to coalesce frequent writes and avoid EMFILE
 let savePending = false;
 let saveScheduled = false;
@@ -26,6 +26,7 @@ function normalizeData(d) {
     return {
         groups: Array.isArray(d?.groups) ? d.groups : [],
         tags: Array.isArray(d?.tags) ? d.tags : [],
+        shares: Array.isArray(d?.shares) ? d.shares : [],
     };
 }
 
@@ -126,9 +127,35 @@ function createServerInstance() {
         });
     }
 
-    wss.on('connection', ws => {
+    function getOnlineClientIds() {
+        try {
+            return [...wss.clients]
+                .filter(c => c.readyState === WebSocket.OPEN && c.id)
+                .map(c => c.id);
+        } catch { return []; }
+    }
+
+    function isHostRemoteAddress(addr) {
+        // consider localhost and private addresses of this machine as host
+        if (!addr) return false;
+        const a = addr.replace('::ffff:', '');
+        if (a === '127.0.0.1' || a === '::1') return true;
+        // also treat connections from any local interface ip as host
+        try {
+            const set = new Set(Object.values(os.networkInterfaces()).flat().filter(Boolean).map(i => i.address));
+            return set.has(a);
+        } catch { return false; }
+    }
+
+    wss.on('connection', (ws, req) => {
         ws.id = uuidv4(); // 为每个连接分配唯一ID
-        ws.send(JSON.stringify({ type: 'full_sync', payload: data }));
+        ws.isHost = isHostRemoteAddress(req?.socket?.remoteAddress);
+        // 单播本客户端身份与在线列表
+        try { ws.send(JSON.stringify({ type: 'you', payload: { clientId: ws.id, isHost: !!ws.isHost, onlineClientIds: getOnlineClientIds() } })); } catch { }
+        // 全量数据同步
+        try { ws.send(JSON.stringify({ type: 'full_sync', payload: data })); } catch { }
+        // 广播在线客户端变更
+        broadcast({ type: 'clients_changed', payload: { onlineClientIds: getOnlineClientIds() } });
 
         ws.on('message', async rawMessage => {
             try {
@@ -389,17 +416,107 @@ function createServerInstance() {
                     }
                 }
 
+                // ====== 文件分享：移除分享（仅分享者或主机） ======
+                if (type === 'remove_share') {
+                    const shareId = payload?.shareId;
+                    if (shareId) {
+                        const idx = (data.shares || []).findIndex(s => s.id === shareId);
+                        if (idx !== -1) {
+                            const sh = data.shares[idx];
+                            if (sh.ownerId === ws.id || ws.isHost) {
+                                // 删除物理文件（容错）
+                                const filePath = path.join(UPLOADS_DIR, sh.storedName || '');
+                                try { if (sh.storedName && fsSync.existsSync(filePath)) fsSync.unlinkSync(filePath); } catch { }
+                                data.shares.splice(idx, 1);
+                                dirty = true;
+                            }
+                        }
+                    }
+                }
+
                 if (dirty) { await saveData(); broadcast({ type: 'full_sync', payload: data }); }
             } catch (e) {
                 console.error("处理WebSocket消息时出错:", e);
             }
         });
+        ws.on('close', () => {
+            // 客户端下线，通知在线状态变更
+            broadcast({ type: 'clients_changed', payload: { onlineClientIds: getOnlineClientIds() } });
+        });
     });
 
     // --- HTTP 路由 ---
+    // 旧上传接口（保留兼容）
     app.post('/upload', upload.single('file'), (req, res) => {
         broadcast({ type: 'files_updated' });
         res.redirect('/');
+    });
+    // 新：分享上传并创建分享记录
+    app.post('/shares/upload', upload.single('file'), async (req, res) => {
+        try {
+            const clientId = (req.query.clientId || '').toString();
+            if (!clientId) return res.status(400).json({ error: 'missing clientId' });
+            const file = req.file;
+            if (!file) return res.status(400).json({ error: 'no file' });
+            const share = {
+                id: uuidv4(),
+                ownerId: clientId,
+                name: file.originalname,
+                size: file.size,
+                type: file.mimetype,
+                storedName: file.filename,
+                createdAt: new Date().toISOString(),
+            };
+            data.shares = Array.isArray(data.shares) ? data.shares : [];
+            data.shares.unshift(share);
+            await saveData();
+            broadcast({ type: 'full_sync', payload: data });
+            res.json({ ok: true, share });
+        } catch (e) {
+            console.error('share upload failed', e);
+            res.status(500).json({ error: 'upload failed' });
+        }
+    });
+    // 列出所有分享
+    app.get('/shares', (req, res) => {
+        const online = new Set([...wss.clients].filter(c => c.readyState === WebSocket.OPEN && c.id).map(c => c.id));
+        const shares = (data.shares || []).map(s => ({ ...s, ownerOnline: online.has(s.ownerId) }));
+        res.json(shares);
+    });
+    // 下载分享的文件（仅在分享者在线或请求来自主机时允许）
+    app.get('/shares/:id/download', (req, res) => {
+        const share = (data.shares || []).find(s => s.id === req.params.id);
+        if (!share) return res.status(404).send('Not found');
+        const online = new Set([...wss.clients].filter(c => c.readyState === WebSocket.OPEN && c.id).map(c => c.id));
+        const remote = req.ip?.replace('::ffff:', '');
+        const allowHost = remote === '127.0.0.1' || remote === '::1' || isHostRemoteAddress(remote);
+        if (!online.has(share.ownerId) && !allowHost) return res.status(403).send('Owner offline');
+        const filepath = path.join(UPLOADS_DIR, share.storedName);
+        if (!fsSync.existsSync(filepath)) return res.status(410).send('File gone');
+        const fileName = share.name || share.storedName;
+        res.setHeader('Content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+        res.setHeader('Content-type', 'application/octet-stream');
+        res.sendFile(filepath);
+    });
+    // 删除分享（HTTP，允许主机删除任意分享，或所有者删除自己的）
+    app.delete('/shares/:id', async (req, res) => {
+        const shareId = req.params.id;
+        if (!shareId) return res.status(400).json({ error: 'missing id' });
+        const idx = (data.shares || []).findIndex(s => s.id === shareId);
+        if (idx === -1) return res.status(404).json({ error: 'not found' });
+        const clientId = (req.query.clientId || '').toString();
+        const remote = req.ip?.replace('::ffff:', '');
+        const allowHost = remote === '127.0.0.1' || remote === '::1' || isHostRemoteAddress(remote);
+        const sh = data.shares[idx];
+        if (!allowHost && sh.ownerId !== clientId) return res.status(403).json({ error: 'forbidden' });
+        try {
+            const filePath = path.join(UPLOADS_DIR, sh.storedName || '');
+            if (sh.storedName && fsSync.existsSync(filePath)) fsSync.unlinkSync(filePath);
+        } catch { }
+        data.shares.splice(idx, 1);
+        await saveData();
+        broadcast({ type: 'full_sync', payload: data });
+        res.json({ ok: true });
     });
     app.get('/files', async (req, res) => {
         try {

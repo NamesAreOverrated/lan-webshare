@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { SafeAreaView, View, Text, TextInput, TouchableOpacity, FlatList, ActivityIndicator, Alert, Linking, ScrollView } from 'react-native';
+import * as DocumentPicker from 'expo-document-picker';
 import DraggableFlatList from 'react-native-draggable-flatlist';
 import { StatusBar } from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -80,8 +81,11 @@ function NotesScreen({ server, onBack }) {
     useEffect(() => { selRef.current.entryId = selectedEntry?.id || null; }, [selectedEntry?.id]);
     // Tabs at top-level: 'notes' | 'files' (only visible when not inside a group/entry)
     const [activeTab, setActiveTab] = useState('notes');
-    const [files, setFiles] = useState([]);
-    const [filesLoading, setFilesLoading] = useState(false);
+    const [myClientId, setMyClientId] = useState(null);
+    const [amHost, setAmHost] = useState(false);
+    const onlineIdsRef = useRef(new Set());
+    const amHostRef = useRef(false);
+    useEffect(() => { amHostRef.current = amHost; }, [amHost]);
     const [prompt, setPrompt] = useState({ visible: false, title: '', placeholder: '', value: '', onConfirm: null });
     const [groupModal, setGroupModal] = useState({ visible: false, title: '', tags: '', mode: 'create', groupId: null });
     const [moveDialog, setMoveDialog] = useState({ visible: false, entryId: null, fromVolumeId: null });
@@ -204,6 +208,19 @@ function NotesScreen({ server, onBack }) {
             const ws = createWS({
                 host: server.host,
                 port: server.port,
+                onEvent: (msg) => {
+                    try {
+                        if (msg.type === 'you') {
+                            setMyClientId(msg?.payload?.clientId || null);
+                            setAmHost(!!msg?.payload?.isHost);
+                            onlineIdsRef.current = new Set(msg?.payload?.onlineClientIds || []);
+                            tryAutoRunPendingDownloads();
+                        } else if (msg.type === 'clients_changed') {
+                            onlineIdsRef.current = new Set(msg?.payload?.onlineClientIds || []);
+                            tryAutoRunPendingDownloads();
+                        }
+                    } catch { }
+                },
                 onSync: async (payload) => {
                     const justReordered = Date.now() - lastReorderAt.current < 400;
                     // 1) Reconcile offline-created temp groups -> real groups upon reconnect
@@ -556,6 +573,7 @@ function NotesScreen({ server, onBack }) {
                     setData(merged);
                     await saveData(server.host, server.port, merged).catch(() => { });
                     setLoading(false);
+                    tryAutoRunPendingDownloads();
                     // If in editor for the selected entry, apply remote updates when safe (no recent local edits/focus)
                     try {
                         if (selRef.current.groupId && selRef.current.entryId) {
@@ -1115,26 +1133,48 @@ function NotesScreen({ server, onBack }) {
         if (!String(group.id).startsWith('temp-group-')) send('move_entry', { groupId: group.id, fromVolumeId, toVolumeId, entryId, toIndex: 0 });
     };
 
-    // Files tab: fetch file list
-    const loadFiles = async () => {
+    // Shares: helpers for pending downloads and upload/remove
+    const getPendingDownloads = async () => {
+        try { const s = await AsyncStorage.getItem('lan.pendingDownloads'); return new Set(JSON.parse(s || '[]')); } catch { return new Set(); }
+    };
+    const setPendingDownloads = async (set) => { try { await AsyncStorage.setItem('lan.pendingDownloads', JSON.stringify(Array.from(set))); } catch { } };
+    const queuePendingDownload = async (shareId) => { const set = await getPendingDownloads(); set.add(shareId); await setPendingDownloads(set); };
+    const tryAutoRunPendingDownloads = async () => {
         try {
-            setFilesLoading(true);
+            const set = await getPendingDownloads(); if (!set.size) return;
             const base = `http://${server.host}:${server.port}`;
-            const res = await fetch(`${base}/files`);
-            const list = await res.json();
-            setFiles(Array.isArray(list) ? list : []);
-        } catch {
-            setFiles([]);
-        } finally {
-            setFilesLoading(false);
+            let changed = false;
+            const shares = (dataRef.current?.shares || []);
+            for (const s of (shares || [])) {
+                const ownerOnline = onlineIdsRef.current.has(s.ownerId);
+                if (set.has(s.id) && (ownerOnline || amHostRef.current)) {
+                    Linking.openURL(`${base}/shares/${encodeURIComponent(s.id)}/download`).catch(() => { });
+                    set.delete(s.id); changed = true;
+                }
+            }
+            if (changed) await setPendingDownloads(set);
+        } catch { }
+    };
+    const pickAndUploadShare = async () => {
+        if (!online) { Alert.alert('提示', '当前离线，无法上传'); return; }
+        const pick = await DocumentPicker.getDocumentAsync({ multiple: false, copyToCacheDirectory: true });
+        if (pick.canceled) return;
+        const asset = (pick.assets && pick.assets[0]) || pick;
+        const uri = asset.uri; const name = asset.name || 'upload.bin'; const type = asset.mimeType || 'application/octet-stream';
+        const fd = new FormData();
+        fd.append('file', { uri, name, type });
+        try {
+            const res = await fetch(`http://${server.host}:${server.port}/shares/upload?clientId=${encodeURIComponent(myClientId || '')}`, { method: 'POST', body: fd });
+            if (!res.ok) throw new Error('upload failed');
+        } catch (e) {
+            Alert.alert('上传失败', '无法上传此文件');
         }
     };
-    useEffect(() => {
-        if (!selectedGroup && activeTab === 'files') {
-            loadFiles();
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activeTab, selectedGroup, server.host, server.port]);
+    const removeShare = async (shareId) => {
+        try { wsRef.current?.send('remove_share', { shareId }); } catch { }
+        setData(prev => ({ ...prev, shares: (prev.shares || []).filter(s => s.id !== shareId) }));
+        await saveData(server.host, server.port, { ...dataRef.current, shares: (dataRef.current.shares || []).filter(s => s.id !== shareId) }).catch(() => { });
+    };
 
     if (loading) {
         return <SafeAreaView style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0f172a' }}><ActivityIndicator color="#818cf8" /><StatusBar style="light" /></SafeAreaView>;
@@ -1160,7 +1200,7 @@ function NotesScreen({ server, onBack }) {
                     <View style={{ marginTop: 12, flexDirection: 'row', backgroundColor: '#0b1220', borderRadius: 10, borderWidth: 1, borderColor: '#334155' }}>
                         {['notes', 'files'].map(tab => (
                             <TouchableOpacity key={tab} onPress={() => setActiveTab(tab)} style={{ flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: activeTab === tab ? '#4f46e5' : 'transparent' }}>
-                                <Text style={{ color: 'white', textAlign: 'center', fontWeight: '600' }}>{tab === 'notes' ? '笔记' : '文件'}</Text>
+                                <Text style={{ color: 'white', textAlign: 'center', fontWeight: '600' }}>{tab === 'notes' ? '笔记' : '文件分享'}</Text>
                             </TouchableOpacity>
                         ))}
                     </View>
@@ -1205,28 +1245,40 @@ function NotesScreen({ server, onBack }) {
                         />
                     </>
                 ) : (
-                    // Files tab
+                    // Shares tab
                     <View style={{ flex: 1, padding: 16 }}>
                         <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
-                            <Button title={filesLoading ? '刷新中...' : '刷新列表'} onPress={loadFiles} disabled={filesLoading} />
-                            <Button title="打开上传页面" onPress={() => Linking.openURL(`http://${server.host}:${server.port}/`)} style={{ backgroundColor: '#10b981' }} />
+                            <Button title="上传分享" onPress={pickAndUploadShare} />
+                            <Button title="打开网页" onPress={() => Linking.openURL(`http://${server.host}:${server.port}/`)} style={{ backgroundColor: '#10b981' }} />
                         </View>
-                        {filesLoading ? (
-                            <View style={{ marginTop: 24 }}><ActivityIndicator color="#818cf8" /></View>
-                        ) : (
-                            <FlatList
-                                data={files}
-                                keyExtractor={(name) => name}
-                                ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
-                                renderItem={({ item: name }) => (
-                                    <TouchableOpacity onPress={() => Linking.openURL(`http://${server.host}:${server.port}/uploads/${encodeURIComponent(name)}`)}
-                                        style={{ backgroundColor: '#1f2937', borderWidth: 1, borderColor: '#334155', borderRadius: 10, padding: 12 }}>
-                                        <Text style={{ color: 'white' }}>{name}</Text>
-                                    </TouchableOpacity>
-                                )}
-                                ListEmptyComponent={<Text style={{ color: '#94a3b8' }}>暂无文件</Text>}
-                            />
-                        )}
+                        <FlatList
+                            data={(data.shares || []).slice().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))}
+                            keyExtractor={(s) => s.id}
+                            ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
+                            renderItem={({ item: s }) => {
+                                const ownerOnline = onlineIdsRef.current.has(s.ownerId);
+                                const mine = myClientId && s.ownerId === myClientId;
+                                const canRemove = amHost || mine;
+                                const canDownload = ownerOnline || amHost;
+                                return (
+                                    <View style={{ backgroundColor: '#1f2937', borderWidth: 1, borderColor: '#334155', borderRadius: 10, padding: 12 }}>
+                                        <Text style={{ color: 'white', fontWeight: '600' }}>{s.name || '未知文件'}</Text>
+                                        <Text style={{ color: '#94a3b8', marginTop: 4, fontSize: 12 }}>{new Date(s.createdAt).toLocaleString()} · 所有者{s.ownerId === myClientId ? '（你）' : ''} · {ownerOnline ? '在线' : '离线'}</Text>
+                                        <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
+                                            {canDownload ? (
+                                                <Button title="下载" onPress={() => Linking.openURL(`http://${server.host}:${server.port}/shares/${encodeURIComponent(s.id)}/download`)} style={{ flex: 1 }} />
+                                            ) : (
+                                                <Button title="排队下载" onPress={() => queuePendingDownload(s.id)} style={{ flex: 1, backgroundColor: '#334155' }} />
+                                            )}
+                                            {canRemove ? (
+                                                <Button title="移除" onPress={() => removeShare(s.id)} style={{ flex: 1, backgroundColor: '#ef4444' }} />
+                                            ) : null}
+                                        </View>
+                                    </View>
+                                );
+                            }}
+                            ListEmptyComponent={<Text style={{ color: '#94a3b8' }}>暂无分享</Text>}
+                        />
                     </View>
                 )}
                 {groupModal.visible && (

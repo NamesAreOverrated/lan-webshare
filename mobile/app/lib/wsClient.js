@@ -5,7 +5,7 @@ export function makeUrl(host, port, secure = false) {
     return `${proto}://${host}:${port}`;
 }
 
-export function createWS({ host, port, onSync, onStatus }) {
+export function createWS({ host, port, onSync, onStatus, onEvent }) {
     let ws;
     let closed = false;
 
@@ -29,6 +29,7 @@ export function createWS({ host, port, onSync, onStatus }) {
             try {
                 const msg = JSON.parse(ev.data);
                 if (msg.type === 'full_sync') onSync?.(msg.payload);
+                else if (msg.type === 'you' || msg.type === 'clients_changed') onEvent?.(msg);
             } catch { }
         };
     };

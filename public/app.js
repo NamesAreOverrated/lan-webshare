@@ -1,5 +1,5 @@
 // 移除 titlebar 滑动隐藏逻辑
-let AppState = { data: { groups: [], tags: [] }, ui: { selectedGroupId: null, selectedEntryId: null, entrySearchTerm: '', activeTab: 'notes', selectedTags: new Set(), isSidebarVisible: true, isEditorFocused: false, lastLocalEditAt: 0, hasRemoteUpdateConflict: false, isApplyingRemoteUpdate: false, isTitleFocused: false, lastTitleEditAt: 0, lastSavedAt: 0, collapsedVolumes: new Set(), editingVolumeId: null, editingVolumeTitle: '' } };
+let AppState = { data: { groups: [], tags: [], shares: [] }, ui: { selectedGroupId: null, selectedEntryId: null, entrySearchTerm: '', activeTab: 'notes', selectedTags: new Set(), isSidebarVisible: true, isEditorFocused: false, lastLocalEditAt: 0, hasRemoteUpdateConflict: false, isApplyingRemoteUpdate: false, isTitleFocused: false, lastTitleEditAt: 0, lastSavedAt: 0, collapsedVolumes: new Set(), editingVolumeId: null, editingVolumeTitle: '' } };
 let easyMDE = null; let debounceTimer = null; let sortableInstance = null;
 let touchStartX = null, touchStartY = null;
 
@@ -82,6 +82,9 @@ const DOM = { sidebar: document.getElementById('sidebar'), notesSidebarContent: 
 let ws;
 let queuedOps = [];
 let online = true;
+let myClientId = null;
+let amHost = false;
+let onlineClientIds = new Set();
 
 function tryLoadOffline() {
     if (!window.__isElectron || !window.lanOffline) return false;
@@ -133,6 +136,18 @@ function connect() {
 }
 function handleWebSocketMessage(event) {
     const message = JSON.parse(event.data);
+    if (message.type === 'you') {
+        myClientId = message?.payload?.clientId || null;
+        amHost = !!message?.payload?.isHost;
+        onlineClientIds = new Set(message?.payload?.onlineClientIds || []);
+        if (AppState.ui.activeTab === 'files') { renderFileSidebar(); tryAutoRunPendingDownloads(); }
+        return;
+    }
+    if (message.type === 'clients_changed') {
+        onlineClientIds = new Set(message?.payload?.onlineClientIds || []);
+        if (AppState.ui.activeTab === 'files') { renderFileSidebar(); tryAutoRunPendingDownloads(); }
+        return;
+    }
     if (message.type === 'full_sync') {
         const { selectedGroupId, selectedEntryId } = AppState.ui;
         const oldData = AppState.data;
@@ -206,7 +221,8 @@ function handleWebSocketMessage(event) {
         } else {
             render();
         }
-    } else if (message.type === 'files_updated' && AppState.ui.activeTab === 'files') { fetchFiles(); }
+        if (AppState.ui.activeTab === 'files') tryAutoRunPendingDownloads();
+    } else if (message.type === 'files_updated' && AppState.ui.activeTab === 'files') { renderFileSidebar(); }
 }
 function sendMessage(type, payload) {
     if (ws?.readyState === WebSocket.OPEN) {
@@ -337,7 +353,124 @@ function renderSidebar() {
     if (activeTab === 'notes') renderNoteSidebar(); else renderFileSidebar();
 }
 function renderNoteSidebar() { DOM.notesSidebarContent.innerHTML = `<button onclick="showNewGroupModal()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-md mb-6 transition-all flex items-center justify-center gap-2"><svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clip-rule="evenodd"></path></svg>新建文字组</button><div id="tag-filter-container-inner" class="mb-4"></div><div id="group-list-inner" class="flex-grow space-y-2"></div>`; renderTagFilters(); renderGroupList(); }
-function renderFileSidebar() { DOM.filesSidebarContent.innerHTML = `<form action="/upload" method="post" enctype="multipart/form-data" class="mb-4"><input type="file" name="file" required class="block w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-100 file:text-indigo-700 hover:file:bg-indigo-200 mb-2 cursor-pointer"/><button type="submit" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-md transition-all">上传文件</button></form><div class="flex-grow"><h3 class="text-lg font-semibold mb-2 border-b border-slate-700 pb-1">已上传的文件</h3><ul id="file-list-inner" class="space-y-2 mt-2"></ul></div>`; fetchFiles(); }
+function renderFileSidebar() {
+    const canUpload = online && !!myClientId;
+    DOM.filesSidebarContent.innerHTML = `
+        <div class="mb-4">
+            <input id="share-upload-file" type="file" ${canUpload ? '' : 'disabled'}
+                class="block w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-100 file:text-indigo-700 hover:file:bg-indigo-200 mb-2 cursor-pointer disabled:opacity-50"/>
+            <button type="button" onclick="uploadShare()" ${canUpload ? '' : 'disabled'}
+                class="w-full bg-green-600 hover:bg-green-700 disabled:bg-slate-600 disabled:hover:bg-slate-600 text-white font-bold py-2 px-4 rounded-md transition-all">提交提供传输的文件</button>
+            <p class="text-xs text-slate-400 mt-1">${online ? (myClientId ? (amHost ? '主机端：可移除任何分享' : '客户端：可移除自己分享，其他端在线时可下载') : '等待识别客户端…') : '离线：无法上传，可移除（排队）和标记下载待连接'}</p>
+        </div>
+        <div class="flex-grow">
+            <h3 class="text-lg font-semibold mb-2 border-b border-slate-700 pb-1">当前分享</h3>
+            <ul id="share-list-inner" class="space-y-2 mt-2"></ul>
+        </div>`;
+    renderShareList();
+}
+
+function renderShareList() {
+    const el = document.getElementById('share-list-inner');
+    if (!el) return;
+    const shares = (AppState?.data?.shares || []).slice().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    if (!shares.length) { el.innerHTML = '<li class="text-sm text-slate-500">暂无分享</li>'; return; }
+    const isOnline = online;
+    const host = (window.__overrideServerHost || window.__serverHost);
+    const port = (window.__overrideServerPort || window.__serverPort);
+    const baseUrl = `http://${host}:${port}`;
+    const pending = getPendingDownloads();
+    el.innerHTML = shares.map(s => {
+        const ownerOnline = onlineClientIds.has(s.ownerId);
+        const mine = myClientId && s.ownerId === myClientId;
+        const canRemove = amHost || mine;
+        const canDownload = ownerOnline || amHost;
+        const pendingThis = pending.has(s.id) && !canDownload;
+        const sizeStr = formatBytes(s.size || 0);
+        const timeStr = new Date(s.createdAt).toLocaleString();
+        const downloadHref = `${baseUrl}/shares/${encodeURIComponent(s.id)}/download`;
+        return `
+            <li class="bg-slate-700/50 p-2 rounded-md hover:bg-slate-700 flex items-center gap-2">
+                <div class="flex-grow min-w-0">
+                    <div class="text-sm truncate">${escHtml(s.name || '未知文件')} <span class="text-xs text-slate-400">· ${sizeStr}</span></div>
+                    <div class="text-xs text-slate-400">${timeStr} · 拥有者${mine ? '（你）' : ''} · ${ownerOnline ? '<span class="text-green-400">在线</span>' : '<span class="text-slate-400">离线</span>'}</div>
+                    ${pendingThis ? '<div class="text-xs text-indigo-300">已加入下载队列，等待对方上线…</div>' : ''}
+                </div>
+                ${canDownload ? `<a href="${downloadHref}" class="px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white text-sm">下载</a>` : `<button onclick="queuePendingDownload('${s.id}')" class="px-2 py-1 rounded bg-slate-600 text-slate-200 text-sm">排队下载</button>`}
+                ${canRemove ? `<button onclick="removeShare('${s.id}')" class="px-2 py-1 rounded bg-red-600 hover:bg-red-700 text-white text-sm">移除分享</button>` : ''}
+            </li>`;
+    }).join('');
+}
+
+function formatBytes(bytes) {
+    if (!bytes || bytes <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0; let v = bytes;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return (v.toFixed(v >= 100 || i === 0 ? 0 : 1)) + ' ' + units[i];
+}
+
+function uploadShare() {
+    const input = document.getElementById('share-upload-file');
+    if (!input || !input.files || !input.files[0]) return;
+    if (!online || !myClientId) { alert('当前离线，无法上传。可在离线时移除分享或排队下载。'); return; }
+    const file = input.files[0];
+    const host = (window.__overrideServerHost || window.__serverHost);
+    const port = (window.__overrideServerPort || window.__serverPort);
+    const baseUrl = `http://${host}:${port}`;
+    const fd = new FormData();
+    fd.append('file', file);
+    fetch(`${baseUrl}/shares/upload?clientId=${encodeURIComponent(myClientId)}`, { method: 'POST', body: fd })
+        .then(r => r.json())
+        .then(() => { input.value = ''; /* full_sync will refresh */ })
+        .catch(() => { alert('上传失败'); });
+}
+
+function removeShare(shareId) {
+    // 优先通过 WebSocket（可离线排队）
+    sendMessage('remove_share', { shareId });
+    // 乐观更新
+    AppState.data.shares = (AppState.data.shares || []).filter(s => s.id !== shareId);
+    renderShareList();
+}
+
+function getPendingDownloads() {
+    try {
+        const raw = localStorage.getItem('lan.pendingDownloads') || '[]';
+        return new Set(JSON.parse(raw));
+    } catch { return new Set(); }
+}
+function setPendingDownloads(set) {
+    try { localStorage.setItem('lan.pendingDownloads', JSON.stringify(Array.from(set))); } catch { }
+}
+function queuePendingDownload(shareId) {
+    const set = getPendingDownloads();
+    set.add(shareId);
+    setPendingDownloads(set);
+    renderShareList();
+}
+function tryAutoRunPendingDownloads() {
+    const set = getPendingDownloads();
+    if (!set.size) return;
+    const host = (window.__overrideServerHost || window.__serverHost);
+    const port = (window.__overrideServerPort || window.__serverPort);
+    const baseUrl = `http://${host}:${port}`;
+    let changed = false;
+    (AppState?.data?.shares || []).forEach(s => {
+        if (set.has(s.id) && (onlineClientIds.has(s.ownerId) || amHost)) {
+            // trigger download
+            const a = document.createElement('a');
+            a.href = `${baseUrl}/shares/${encodeURIComponent(s.id)}/download`;
+            a.download = s.name || '';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            set.delete(s.id);
+            changed = true;
+        }
+    });
+    if (changed) setPendingDownloads(set);
+}
 function renderTagFilters() {
     const el = document.getElementById('tag-filter-container-inner');
     el.innerHTML = AppState.data.tags.length > 0 ? `
