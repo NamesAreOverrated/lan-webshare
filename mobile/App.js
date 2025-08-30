@@ -908,6 +908,27 @@ function NotesScreen({ server, onBack }) {
         return hasTag && (g.title || '').toLowerCase().includes(search.toLowerCase());
     }), [groups, selectedTags, search]);
 
+    // Top-level memoized maps/lists for the selected group to keep hooks order stable
+    const groupVolumes = useMemo(() => (group?.volumes || []), [group?.volumes]);
+    const entryMap = useMemo(() => new Map((group?.entries || []).map(e => [e.id, e])), [group?.entries]);
+    const flatData = useMemo(() => {
+        // Compose [header, entries...] per volume; respect collapsed state
+        const out = [];
+        for (const v of (groupVolumes || [])) {
+            out.push({ __type: 'header', volumeId: v.id });
+            const collapsed = !!uiRef.current.collapsedVolumes[v.id];
+            if (!collapsed) {
+                for (const id of (v.entryIds || [])) {
+                    if (entryMap.has(id)) out.push({ __type: 'entry', volumeId: v.id, entryId: id });
+                }
+            }
+        }
+        return out;
+    }, [groupVolumes, entryMap, Object.keys(uiRef.current.collapsedVolumes || {}).join(',')]);
+    const flatRef = useRef(flatData);
+    useEffect(() => { flatRef.current = flatData; }, [flatData]);
+    const dragRef = useRef({ item: null, index: -1 });
+
     const toggleTag = (tag) => {
         setSelectedTags(prev => {
             const next = new Set(prev);
@@ -1226,8 +1247,7 @@ function NotesScreen({ server, onBack }) {
 
     if (selectedGroup && !selectedEntry) {
         const group = data.groups.find(g => g.id === selectedGroup.id);
-        const entryMap = new Map((group?.entries || []).map(e => [e.id, e]));
-        const volumes = group?.volumes || [];
+        const volumes = groupVolumes;
         return (
             <SafeAreaView style={{ flex: 1, backgroundColor: '#0f172a' }}>
                 <StatusBar style="light" />
@@ -1243,82 +1263,136 @@ function NotesScreen({ server, onBack }) {
                 </View>
                 <View style={{ padding: 16, paddingTop: 0, flex: 1 }}>
                     <DraggableFlatList
-                        data={volumes}
-                        keyExtractor={(item) => item.id}
-                        nestedScrollEnabled
+                        activationDistance={8}
+                        autoscrollThreshold={32}
+                        data={flatData}
+                        windowSize={12}
+                        initialNumToRender={24}
+                        maxToRenderPerBatch={24}
+                        updateCellsBatchingPeriod={16}
+                        removeClippedSubviews
+                        keyExtractor={(item, index) => item.__type === 'header' ? `h-${item.volumeId}` : `e-${item.entryId}`}
                         contentContainerStyle={{ paddingBottom: 24 }}
-                        renderItem={({ item: vol, drag, isActive, index: vIdx }) => {
-                            const collapsed = !!uiRef.current.collapsedVolumes[vol.id];
-                            return (
-                                <View style={{ marginBottom: 18, opacity: isActive ? 0.9 : 1 }}>
-                                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                                        <TouchableOpacity onLongPress={drag} onPress={() => {
-                                            const next = { ...uiRef.current, collapsedVolumes: { ...uiRef.current.collapsedVolumes, [vol.id]: !collapsed } };
-                                            uiRef.current = next; saveUI(server.host, server.port, next).catch(() => { });
-                                            // force refresh by updating state unrelatedly (toggle via setData clone)
-                                            setData(prev => JSON.parse(JSON.stringify(prev)));
-                                        }}>
-                                            <Text style={{ color: '#e2e8f0', fontSize: 16, fontWeight: '700' }}>{collapsed ? '▶ ' : '▼ '} {vol.title}</Text>
-                                        </TouchableOpacity>
-                                        <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
-                                            <TouchableOpacity onPress={() => renameVolume(group, vol)}><Text style={{ color: '#93c5fd' }}>重命名</Text></TouchableOpacity>
-                                            <TouchableOpacity onPress={() => createEntryInVolume(group.id, vol.id)}><Text style={{ color: '#10b981' }}>＋ 条目</Text></TouchableOpacity>
-                                            <TouchableOpacity onPress={() => deleteVolume(group, vol)}><Text style={{ color: '#ef4444' }}>删除</Text></TouchableOpacity>
+                        onDragBegin={(index) => { dragRef.current = { item: flatRef.current[index], index }; }}
+                        renderItem={({ item, drag, isActive, index }) => {
+                            if (item.__type === 'header') {
+                                const vol = (group?.volumes || []).find(v => v.id === item.volumeId);
+                                const collapsed = !!uiRef.current.collapsedVolumes[item.volumeId];
+                                return (
+                                    <View style={{ marginBottom: 10, opacity: isActive ? 0.95 : 1 }}>
+                                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                                            <TouchableOpacity onLongPress={drag} onPress={() => {
+                                                const next = { ...uiRef.current, collapsedVolumes: { ...uiRef.current.collapsedVolumes, [item.volumeId]: !collapsed } };
+                                                uiRef.current = next; saveUI(server.host, server.port, next).catch(() => { });
+                                                setData(prev => JSON.parse(JSON.stringify(prev)));
+                                            }}>
+                                                <Text style={{ color: '#e2e8f0', fontSize: 16, fontWeight: '700' }}>{collapsed ? '▶ ' : '▼ '} {vol?.title || '未命名卷'}</Text>
+                                            </TouchableOpacity>
+                                            <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+                                                <TouchableOpacity onPress={() => vol && renameVolume(group, vol)}><Text style={{ color: '#93c5fd' }}>重命名</Text></TouchableOpacity>
+                                                <TouchableOpacity onPress={() => vol && createEntryInVolume(group.id, vol.id)}><Text style={{ color: '#10b981' }}>＋ 条目</Text></TouchableOpacity>
+                                                <TouchableOpacity onPress={() => vol && deleteVolume(group, vol)}><Text style={{ color: '#ef4444' }}>删除</Text></TouchableOpacity>
+                                            </View>
                                         </View>
                                     </View>
-                                    {!collapsed && (
-                                        <View style={{ marginTop: 8 }}>
-                                            <DraggableFlatList
-                                                activationDistance={8}
-                                                autoscrollThreshold={24}
-                                                scrollEnabled
-                                                nestedScrollEnabled
-                                                data={(vol.entryIds || []).map(id => entryMap.get(id)).filter(Boolean)}
-                                                keyExtractor={(item) => item.id}
-                                                renderItem={({ item: e, drag, isActive, getIndex }) => (
-                                                    <View style={{ padding: 12, backgroundColor: '#1f2937', borderRadius: 10, marginBottom: 12, borderColor: '#334155', borderWidth: 1, opacity: isActive ? 0.9 : 1 }}>
-                                                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                                                            <TouchableOpacity onLongPress={drag} onPress={() => setSelectedEntry(e)} style={{ flex: 1 }}>
-                                                                <Text style={{ color: 'white', fontWeight: '600' }}>≡ {e.title || '未命名条目'}{e.__pending ? '（待创建）' : ''}</Text>
-                                                                <Text numberOfLines={2} style={{ color: '#94a3b8', marginTop: 6 }}>{(e.content || '').replace(/[#*_`>\\-]/g, ' ').slice(0, 140)}</Text>
-                                                            </TouchableOpacity>
-                                                            <TouchableOpacity onPress={() => setActionSheet({ visible: true, groupId: group.id, volumeId: vol.id, entryId: e.id })}>
-                                                                <Text style={{ color: '#93c5fd', paddingHorizontal: 8, paddingVertical: 6 }}>⋯ 操作</Text>
-                                                            </TouchableOpacity>
-                                                        </View>
-                                                    </View>
-                                                )}
-                                                onDragEnd={({ data }) => {
-                                                    // 仅对该卷的真实 entryIds 进行重排；保留未显示（理论上已过滤掉）的条目在尾部
-                                                    const picked = data.map(x => x.id);
-                                                    lastReorderAt.current = Date.now();
-                                                    setData(prev => {
-                                                        const next = JSON.parse(JSON.stringify(prev));
-                                                        const g = next.groups.find(x => x.id === group.id);
-                                                        const vv = g?.volumes.find(v => v.id === vol.id);
-                                                        if (vv) {
-                                                            const current = Array.isArray(vv.entryIds) ? vv.entryIds : [];
-                                                            const allow = new Set(current);
-                                                            const filteredPicked = picked.filter(id => allow.has(id));
-                                                            const remaining = current.filter(id => !filteredPicked.includes(id));
-                                                            const merged = [...filteredPicked, ...remaining];
-                                                            vv.entryIds = merged;
-                                                            if (!String(group.id).startsWith('temp-group-')) {
-                                                                send('reorder_entries', { groupId: group.id, volumeId: vol.id, newOrder: merged });
-                                                            }
-                                                            try { const ui = uiRef.current; ui.orders.entries[group.id] = ui.orders.entries[group.id] || {}; ui.orders.entries[group.id][vol.id] = [...merged]; uiRef.current = ui; saveUI(server.host, server.port, ui).catch(() => { }); } catch { }
-                                                        }
-                                                        saveData(server.host, server.port, next).catch(() => { });
-                                                        return next;
-                                                    });
-                                                }}
-                                            />
-                                        </View>
-                                    )}
+                                );
+                            }
+                            // entry row
+                            const e = entryMap.get(item.entryId);
+                            return (
+                                <View style={{ padding: 12, backgroundColor: '#1f2937', borderRadius: 10, marginBottom: 12, borderColor: '#334155', borderWidth: 1, opacity: isActive ? 0.95 : 1 }}>
+                                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                        <TouchableOpacity onLongPress={drag} onPress={() => e && setSelectedEntry(e)} style={{ flex: 1 }}>
+                                            <Text style={{ color: 'white', fontWeight: '600' }}>≡ {e?.title || '未命名条目'}{e?.__pending ? '（待创建）' : ''}</Text>
+                                            <Text numberOfLines={2} style={{ color: '#94a3b8', marginTop: 6 }}>{((e?.content || '')).replace(/[#*_`>\\-]/g, ' ').slice(0, 140)}</Text>
+                                        </TouchableOpacity>
+                                        <TouchableOpacity onPress={() => setActionSheet({ visible: true, groupId: group.id, volumeId: item.volumeId, entryId: item.entryId })}>
+                                            <Text style={{ color: '#93c5fd', paddingHorizontal: 8, paddingVertical: 6 }}>⋯ 操作</Text>
+                                        </TouchableOpacity>
+                                    </View>
                                 </View>
                             );
                         }}
-                        onDragEnd={({ from, to }) => onDragEndVolumes(group, from, to)}
+                        onDragEnd={({ data, from, to }) => {
+                            const start = dragRef.current.item;
+                            dragRef.current = { item: null, index: -1 };
+                            if (!start) return;
+                            lastReorderAt.current = Date.now();
+                            // Header dragged => reorder volumes by headers order in `data`
+                            if (start.__type === 'header') {
+                                const newVolIds = data.filter(x => x.__type === 'header').map(h => h.volumeId);
+                                setData(prev => {
+                                    const next = JSON.parse(JSON.stringify(prev));
+                                    const g = next.groups.find(x => x.id === group.id);
+                                    if (g) {
+                                        const volMap = new Map((g.volumes || []).map(v => [v.id, v]));
+                                        g.volumes = newVolIds.map(id => volMap.get(id)).filter(Boolean);
+                                        try { const ui = uiRef.current; ui.orders.volume[g.id] = [...newVolIds]; uiRef.current = ui; saveUI(server.host, server.port, ui).catch(() => { }); } catch { }
+                                        if (!String(g.id).startsWith('temp-group-')) send('reorder_volumes', { groupId: g.id, newOrder: newVolIds });
+                                        saveData(server.host, server.port, next).catch(() => { });
+                                    }
+                                    return next;
+                                });
+                                return;
+                            }
+                            // Entry dragged => compute target volume and index from `data` and `to`
+                            const toIdx = Math.max(0, Math.min(data.length - 1, to));
+                            // find nearest header at or above toIdx
+                            let headerIdx = toIdx;
+                            while (headerIdx >= 0 && data[headerIdx]?.__type !== 'header') headerIdx--;
+                            if (headerIdx < 0) {
+                                // fallback to first volume
+                                headerIdx = data.findIndex(x => x.__type === 'header');
+                            }
+                            const targetHeader = data[headerIdx];
+                            const targetVolId = targetHeader?.volumeId;
+                            // compute position within target volume: count entries between headerIdx and toIdx in data for that volume
+                            let toPos = 0;
+                            for (let i = headerIdx + 1; i <= toIdx; i++) {
+                                if (data[i]?.__type === 'entry' && data[i]?.volumeId === targetVolId) toPos++;
+                            }
+                            const fromVolId = start.volumeId;
+                            const entryId = start.entryId;
+                            setData(prev => {
+                                const next = JSON.parse(JSON.stringify(prev));
+                                const g = next.groups.find(x => x.id === group.id);
+                                if (!g) return next;
+                                const fromV = (g.volumes || []).find(v => v.id === fromVolId);
+                                const toV = (g.volumes || []).find(v => v.id === targetVolId);
+                                if (!fromV || !toV) return next;
+                                const srcIds = Array.isArray(fromV.entryIds) ? [...fromV.entryIds] : [];
+                                const dstIds = Array.isArray(toV.entryIds) ? [...toV.entryIds] : [];
+                                const oldIdx = srcIds.indexOf(entryId);
+                                if (oldIdx === -1) return next;
+                                srcIds.splice(oldIdx, 1);
+                                if (fromVolId === targetVolId) {
+                                    const adj = Math.max(0, Math.min(srcIds.length, toPos));
+                                    srcIds.splice(adj, 0, entryId);
+                                    fromV.entryIds = srcIds;
+                                    try { const ui = uiRef.current; ui.orders.entries[g.id] = ui.orders.entries[g.id] || {}; ui.orders.entries[g.id][fromVolId] = [...srcIds]; uiRef.current = ui; saveUI(server.host, server.port, ui).catch(() => { }); } catch { }
+                                    if (!String(g.id).startsWith('temp-group-') && !String(entryId).startsWith('temp')) {
+                                        send('reorder_entries', { groupId: g.id, volumeId: fromVolId, newOrder: srcIds.filter(id => !String(id).startsWith('temp')) });
+                                    }
+                                } else {
+                                    const adj = Math.max(0, Math.min(dstIds.length, toPos));
+                                    dstIds.splice(adj, 0, entryId);
+                                    fromV.entryIds = srcIds; toV.entryIds = dstIds;
+                                    try {
+                                        const ui = uiRef.current; ui.orders.entries[g.id] = ui.orders.entries[g.id] || {};
+                                        ui.orders.entries[g.id][fromVolId] = [...srcIds];
+                                        ui.orders.entries[g.id][targetVolId] = [...dstIds];
+                                        uiRef.current = ui; saveUI(server.host, server.port, ui).catch(() => { });
+                                    } catch { }
+                                    if (!String(g.id).startsWith('temp-group-') && !String(entryId).startsWith('temp')) {
+                                        const cleanIdx = Math.max(0, Math.min(dstIds.filter(id => !String(id).startsWith('temp')).length - 1, adj));
+                                        send('move_entry', { groupId: g.id, fromVolumeId: fromVolId, toVolumeId: targetVolId, entryId, toIndex: cleanIdx });
+                                    }
+                                }
+                                g.updatedAt = new Date().toISOString();
+                                saveData(server.host, server.port, next).catch(() => { });
+                                return next;
+                            });
+                        }}
                     />
                 </View>
                 {/* Floating New Entry Button */}
