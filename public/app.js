@@ -565,6 +565,7 @@ function initVolumeAndEntrySortables(groupId) {
     // 卷排序
     const volContainer = document.getElementById('volume-list-container');
     if (!volContainer) return;
+    const hasFilter = !!(AppState.ui.entrySearchTerm && AppState.ui.entrySearchTerm.trim());
     if (volContainer._volSortable) { volContainer._volSortable.destroy(); }
     volContainer._volSortable = new Sortable(volContainer, {
         animation: 150,
@@ -589,6 +590,8 @@ function initVolumeAndEntrySortables(groupId) {
             animation: 150,
             ghostClass: 'sortable-ghost',
             chosenClass: 'sortable-chosen',
+            // 当搜索过滤生效时，禁用拖拽，避免只对部分可见条目排序导致顺序被覆盖
+            disabled: hasFilter,
             onEnd: (evt) => {
                 const fromVolId = evt.from.getAttribute('data-volume-id');
                 const toVolId = evt.to.getAttribute('data-volume-id');

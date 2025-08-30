@@ -18,6 +18,9 @@ let started = false;
 let DB_PATH = process.env.DB_PATH || path.join(__dirname, 'db.json');
 let UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, 'uploads');
 let data = { groups: [], tags: [] };
+// write queue to coalesce frequent writes and avoid EMFILE
+let savePending = false;
+let saveScheduled = false;
 
 function normalizeData(d) {
     return {
@@ -73,9 +76,18 @@ async function loadData() {
 }
 
 async function saveData() {
-    try {
-        await fs.writeFile(DB_PATH, JSON.stringify(data, null, 2), 'utf8');
-    } catch (error) { console.error('无法保存数据:', error); }
+    // schedule a single write in the next tick; if a write is ongoing, mark pending
+    if (saveScheduled) { savePending = true; return; }
+    saveScheduled = true;
+    setImmediate(async () => {
+        try {
+            await fs.writeFile(DB_PATH, JSON.stringify(data, null, 2), 'utf8');
+        } catch (error) { console.error('无法保存数据:', error); }
+        finally {
+            saveScheduled = false;
+            if (savePending) { savePending = false; saveData(); }
+        }
+    });
 }
 
 // --- Server factory ---
@@ -123,6 +135,7 @@ function createServerInstance() {
                 const message = JSON.parse(rawMessage);
                 const { type, payload } = message;
                 let group, entry;
+                let dirty = false;
 
                 switch (type) {
                     case 'create_group':
@@ -132,7 +145,7 @@ function createServerInstance() {
                         newGroup.volumes.push({ id: uuidv4(), title: '默认分组', entryIds: [] });
                         data.groups.push(newGroup);
                         (payload.tags || []).forEach(tag => !data.tags.includes(tag) && data.tags.push(tag));
-                        break;
+                        dirty = true; break;
                     case 'create_entry': {
                         group = data.groups.find(g => g.id === payload.groupId);
                         if (group) {
@@ -148,7 +161,31 @@ function createServerInstance() {
                             vol.entryIds = Array.isArray(vol.entryIds) ? vol.entryIds : [];
                             // place at front
                             vol.entryIds.unshift(newEntry.id);
-                            group.updatedAt = now;
+                            group.updatedAt = now; dirty = true;
+                        }
+                        break;
+                    }
+                    case 'create_entry_with_content': {
+                        group = data.groups.find(g => g.id === payload.groupId);
+                        if (group) {
+                            const createdAt = payload.createdAt || new Date().toISOString();
+                            const updatedAt = payload.updatedAt || createdAt;
+                            const newEntry = {
+                                id: uuidv4(),
+                                title: payload.title || '新条目',
+                                content: payload.content || '',
+                                createdAt,
+                                updatedAt,
+                            };
+                            group.entries.unshift(newEntry);
+                            ensureVolumesForGroup(group);
+                            // remove from any volume first to be safe
+                            group.volumes.forEach(v => v.entryIds = (v.entryIds || []).filter(id => id !== newEntry.id));
+                            const volId = payload.volumeId || group.volumes[0].id;
+                            const vol = group.volumes.find(v => v.id === volId) || group.volumes[0];
+                            vol.entryIds = Array.isArray(vol.entryIds) ? vol.entryIds : [];
+                            vol.entryIds.unshift(newEntry.id);
+                            group.updatedAt = updatedAt; dirty = true;
                         }
                         break;
                     }
@@ -177,7 +214,7 @@ function createServerInstance() {
                             // remove from all volumes
                             ensureVolumesForGroup(group);
                             group.volumes.forEach(v => v.entryIds = (v.entryIds || []).filter(id => id !== payload.entryId));
-                            group.updatedAt = new Date().toISOString();
+                            group.updatedAt = new Date().toISOString(); dirty = true;
                         }
                         break;
                     case 'update_group':
@@ -190,14 +227,14 @@ function createServerInstance() {
                                 group.title = payload.title;
                                 group.tags = payload.tags || [];
                                 group.updatedAt = incoming;
-                                (payload.tags || []).forEach(tag => !data.tags.includes(tag) && data.tags.push(tag));
+                                (payload.tags || []).forEach(tag => !data.tags.includes(tag) && data.tags.push(tag)); dirty = true;
                             }
                         }
                         break;
                     case 'delete_group':
                         const groupToDelete = data.groups.find(g => g.id === payload.id);
                         if (groupToDelete) {
-                            data.groups = data.groups.filter(g => g.id !== payload.id);
+                            data.groups = data.groups.filter(g => g.id !== payload.id); dirty = true;
                             // 清理不再使用的标签
                             const allRemainingTags = new Set(data.groups.flatMap(g => g.tags || []));
                             data.tags = data.tags.filter(tag => allRemainingTags.has(tag));
@@ -222,7 +259,7 @@ function createServerInstance() {
                             const vol = findVolumeContaining(group, payload.entryId) || group.volumes[0];
                             const idx = vol.entryIds.indexOf(payload.entryId);
                             vol.entryIds.splice(idx + 1, 0, newEntry.id);
-                            group.updatedAt = now;
+                            group.updatedAt = now; dirty = true;
                         }
                         break;
                     }
@@ -234,11 +271,19 @@ function createServerInstance() {
                             ensureVolumesForGroup(group);
                             const vol = group.volumes.find(v => v.id === payload.volumeId);
                             if (vol) {
-                                const entrySet = new Set(vol.entryIds);
-                                const newOrdered = (payload.newOrder || []).filter(id => entrySet.has(id));
-                                if (newOrdered.length === vol.entryIds.length) {
-                                    vol.entryIds = newOrdered;
-                                    group.updatedAt = new Date().toISOString();
+                                // 合并排序：优先按客户端给出的顺序排列已存在的条目，
+                                // 其余未在 newOrder 出现的条目保持当前相对顺序附加在末尾。
+                                const current = Array.isArray(vol.entryIds) ? vol.entryIds.slice() : [];
+                                const allowSet = new Set(current);
+                                const proposed = Array.isArray(payload.newOrder) ? payload.newOrder : [];
+                                const picked = proposed.filter(id => allowSet.has(id));
+                                const remaining = current.filter(id => !picked.includes(id));
+                                const merged = [...picked, ...remaining];
+                                // 仅当有变化时写回
+                                const changed = merged.length !== current.length || merged.some((id, i) => id !== current[i]);
+                                if (changed) {
+                                    vol.entryIds = merged;
+                                    group.updatedAt = new Date().toISOString(); dirty = true;
                                 }
                             }
                         }
@@ -258,7 +303,7 @@ function createServerInstance() {
                                 group.entries.push(newEntry);
                                 const insertIndex = payload.position === 'before' ? anchorIndex : anchorIndex + 1;
                                 vol.entryIds.splice(insertIndex, 0, newEntry.id);
-                                group.updatedAt = now;
+                                group.updatedAt = now; dirty = true;
                             }
                         }
                         break;
@@ -271,7 +316,7 @@ function createServerInstance() {
                             ensureVolumesForGroup(group);
                             const vol = { id: uuidv4(), title: payload.title || '新分组', entryIds: [] };
                             group.volumes.push(vol);
-                            group.updatedAt = new Date().toISOString();
+                            group.updatedAt = new Date().toISOString(); dirty = true;
                         }
                         break;
                     }
@@ -281,7 +326,7 @@ function createServerInstance() {
                             const vol = (group.volumes || []).find(v => v.id === payload.volumeId);
                             if (vol) {
                                 vol.title = payload.title || vol.title;
-                                group.updatedAt = new Date().toISOString();
+                                group.updatedAt = new Date().toISOString(); dirty = true;
                             }
                         }
                         break;
@@ -302,7 +347,7 @@ function createServerInstance() {
                                 const toVol = vols[targetIdx === -1 ? vols.length - 1 : targetIdx];
                                 toVol.entryIds = [...(vols[idx].entryIds || []), ...(toVol.entryIds || [])];
                                 vols.splice(idx, 1);
-                                group.updatedAt = new Date().toISOString();
+                                group.updatedAt = new Date().toISOString(); dirty = true;
                             }
                         }
                         break;
@@ -311,13 +356,16 @@ function createServerInstance() {
                         group = data.groups.find(g => g.id === payload.groupId);
                         if (group) {
                             ensureVolumesForGroup(group);
-                            const idSet = new Set(group.volumes.map(v => v.id));
-                            const newOrdered = (payload.newOrder || []).filter(id => idSet.has(id));
-                            if (newOrdered.length === group.volumes.length) {
-                                const map = new Map(group.volumes.map(v => [v.id, v]));
-                                group.volumes = newOrdered.map(id => map.get(id));
-                                group.updatedAt = new Date().toISOString();
-                            }
+                            const current = Array.isArray(group.volumes) ? group.volumes.slice() : [];
+                            const idToVol = new Map(current.map(v => [v.id, v]));
+                            const allowed = new Set(current.map(v => v.id));
+                            const proposed = Array.isArray(payload.newOrder) ? payload.newOrder : [];
+                            const pickedIds = proposed.filter(id => allowed.has(id));
+                            const remaining = current.filter(v => !pickedIds.includes(v.id)).map(v => v.id);
+                            const mergedIds = [...pickedIds, ...remaining];
+                            const merged = mergedIds.map(id => idToVol.get(id)).filter(Boolean);
+                            const changed = merged.length !== current.length || merged.some((v, i) => v.id !== current[i].id);
+                            if (changed) { group.volumes = merged; group.updatedAt = new Date().toISOString(); dirty = true; }
                         }
                         break;
                     }
@@ -333,16 +381,14 @@ function createServerInstance() {
                                 const toIds = toVol.entryIds || [];
                                 const insertIndex = typeof payload.toIndex === 'number' && payload.toIndex >= 0 ? Math.min(payload.toIndex, toIds.length) : toIds.length;
                                 toIds.splice(insertIndex, 0, eid);
-                                toVol.entryIds = toIds;
-                                group.updatedAt = new Date().toISOString();
+                                toVol.entryIds = toIds; group.updatedAt = new Date().toISOString(); dirty = true;
                             }
                         }
                         break;
                     }
                 }
 
-                await saveData();
-                broadcast({ type: 'full_sync', payload: data }); // 广播最新数据给所有客户端
+                if (dirty) { await saveData(); broadcast({ type: 'full_sync', payload: data }); }
             } catch (e) {
                 console.error("处理WebSocket消息时出错:", e);
             }
