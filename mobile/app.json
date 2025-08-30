@@ -1,0 +1,28 @@
+{
+    "expo": {
+        "name": "LAN WebShare",
+        "slug": "lan-webshare-mobile",
+        "version": "1.0.0",
+        "scheme": "lanwebshare",
+        "orientation": "portrait",
+        "userInterfaceStyle": "automatic",
+        "splash": {
+            "resizeMode": "contain",
+            "backgroundColor": "#0f172a"
+        },
+        "updates": {
+            "fallbackToCacheTimeout": 0
+        },
+        "assetBundlePatterns": [
+            "**/*"
+        ],
+        "ios": {
+            "supportsTablet": true
+        },
+        "android": {},
+        "web": {
+            "output": "static"
+        },
+        "plugins": []
+    }
+}

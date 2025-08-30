@@ -90,15 +90,10 @@ function createServerInstance() {
         res.setHeader('X-Content-Type-Options', 'nosniff');
         res.setHeader('X-Frame-Options', 'SAMEORIGIN');
         res.setHeader('Referrer-Policy', 'no-referrer');
-        // CORS for Electron/mobile clients
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Accept');
-        if (req.method === 'OPTIONS') return res.sendStatus(204);
         next();
     });
     if (!fsSync.existsSync(UPLOADS_DIR)) { fsSync.mkdirSync(UPLOADS_DIR, { recursive: true }); }
-    // Do NOT expose web UI anymore
+    app.use(express.static(path.join(__dirname, 'public')));
     app.use('/uploads', express.static(UPLOADS_DIR));
     const storage = multer.diskStorage({
         destination: (req, file, cb) => cb(null, UPLOADS_DIR),
@@ -357,11 +352,7 @@ function createServerInstance() {
     // --- HTTP 路由 ---
     app.post('/upload', upload.single('file'), (req, res) => {
         broadcast({ type: 'files_updated' });
-        res.json({ ok: true, file: req.file?.filename || null });
-    });
-    // Health/status route (no UI exposure)
-    app.get('/', (req, res) => {
-        res.json({ ok: true, service: 'lan-webshare', ws: true });
+        res.redirect('/');
     });
     app.get('/files', async (req, res) => {
         try {

@@ -320,41 +320,7 @@ function renderSidebar() {
     if (activeTab === 'notes') renderNoteSidebar(); else renderFileSidebar();
 }
 function renderNoteSidebar() { DOM.notesSidebarContent.innerHTML = `<button onclick="showNewGroupModal()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-md mb-6 transition-all flex items-center justify-center gap-2"><svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clip-rule="evenodd"></path></svg>新建文字组</button><div id="tag-filter-container-inner" class="mb-4"></div><div id="group-list-inner" class="flex-grow space-y-2"></div>`; renderTagFilters(); renderGroupList(); }
-function renderFileSidebar() {
-    DOM.filesSidebarContent.innerHTML = `
-        <form id="upload-form" class="mb-4">
-            <input id="upload-input" type="file" name="file" required class="block w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-100 file:text-indigo-700 hover:file:bg-indigo-200 mb-2 cursor-pointer"/>
-            <button type="submit" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-md transition-all">上传文件</button>
-        </form>
-        <div class="flex-grow">
-            <h3 class="text-lg font-semibold mb-2 border-b border-slate-700 pb-1">已上传的文件</h3>
-            <ul id="file-list-inner" class="space-y-2 mt-2"></ul>
-        </div>`;
-    // Bind upload via fetch to server (works when UI is file://)
-    const form = document.getElementById('upload-form');
-    const input = document.getElementById('upload-input');
-    if (form && input) {
-        form.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            if (!input.files || !input.files.length) return;
-            const file = input.files[0];
-            const fd = new FormData();
-            fd.append('file', file);
-            const baseUrl = `http://${(window.__overrideServerHost || window.__serverHost)}:${(window.__overrideServerPort || window.__serverPort)}`;
-            try {
-                const res = await fetch(`${baseUrl}/upload`, { method: 'POST', body: fd });
-                const js = await res.json().catch(() => ({}));
-                if (!res.ok || js?.ok === false) throw new Error('upload failed');
-                input.value = '';
-                fetchFiles();
-            } catch (err) {
-                alert('上传失败，稍后重试');
-                console.error('Upload failed', err);
-            }
-        });
-    }
-    fetchFiles();
-}
+function renderFileSidebar() { DOM.filesSidebarContent.innerHTML = `<form action="/upload" method="post" enctype="multipart/form-data" class="mb-4"><input type="file" name="file" required class="block w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-100 file:text-indigo-700 hover:file:bg-indigo-200 mb-2 cursor-pointer"/><button type="submit" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-md transition-all">上传文件</button></form><div class="flex-grow"><h3 class="text-lg font-semibold mb-2 border-b border-slate-700 pb-1">已上传的文件</h3><ul id="file-list-inner" class="space-y-2 mt-2"></ul></div>`; fetchFiles(); }
 function renderTagFilters() {
     const el = document.getElementById('tag-filter-container-inner');
     el.innerHTML = AppState.data.tags.length > 0 ? `
