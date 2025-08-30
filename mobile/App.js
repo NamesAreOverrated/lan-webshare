@@ -1249,7 +1249,6 @@ function NotesScreen({ server, onBack }) {
                     <View style={{ flex: 1, padding: 16 }}>
                         <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
                             <Button title="上传分享" onPress={pickAndUploadShare} />
-                            <Button title="打开网页" onPress={() => Linking.openURL(`http://${server.host}:${server.port}/`)} style={{ backgroundColor: '#10b981' }} />
                         </View>
                         <FlatList
                             data={(data.shares || []).slice().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))}
